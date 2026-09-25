@@ -35,7 +35,8 @@ function renderFrame(t, samples, dt, shutter) {
   const t0 = performance.now();
   samples = Math.max(1, samples | 0);
   // the fast moves (the tilt into the sky, the TV switching off) get a longer, denser shutter
-  if (samples > 1 && ((t > SC.nota - 0.05 && t < 42.17) || (t > 9.58 && t < SC.palco))) samples *= 3;
+  if (samples > 1 && t > SC.nota - 0.05 && t < 42.17) samples *= 6;
+  else if (samples > 1 && t > 9.58 && t < SC.palco) samples *= 3;
   if (samples === 1) {
     drawScene(sctx, t);
     glUpload(SCN);

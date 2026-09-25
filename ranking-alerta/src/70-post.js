@@ -140,7 +140,7 @@ function postAt(t) {
   fl(10.07, [1, 0.95, 0.9], 0.12, 9);     // the spotlight
   fl(39.18, [1, 0.93, 0.7], 0.18, 5);    // the lamp
   fl(59.17, [1, 1, 1], 0.1, 7);           // the watch becomes the mark
-  return { time: t, ca, glitch, flash, seed: Math.floor(t * 30), grain: lerp(0.055, 0.03, light), vig: lerp(0.7, 0.45, light), bloom: lerp(0.45, 0.5, light) };
+  return { time: t, ca, glitch, flash, seed: Math.floor(t * 30), grain: lerp(0.045, 0.026, light), vig: lerp(0.7, 0.45, light), bloom: lerp(0.45, 0.5, light) };
 }
 
 // lens settings for a still (dark world: heavier grain and vignette)

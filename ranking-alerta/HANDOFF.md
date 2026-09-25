@@ -12,8 +12,8 @@ amarelo, logo branco). Fonte: Poppins. Metáfora central: **lobos em pele de cor
 político é um rosto humano sorridente (a máscara); por trás há um lobo sombrio (vermelho) ou, para
 poucos, um cordeiro (verde). O usuário pediu para abusar dessa linguagem.
 
-**Estado:** os 9 quadros-chave estão prontos (`src/40-kv.js`) e foram enviados para validação.
-**Ainda não foi animado nada.** Confirme com o usuário se os quadros foram aprovados antes de animar.
+**Estado:** os 9 quadros-chave foram aprovados e o vídeo está **animado**, com trilha e narração
+(`src/50-dark.js`, `src/60-light.js`, `src/80-audio.js`). Veja "Como assistir, gravar e renderizar" abaixo.
 
 ## Narração (texto e tempos medidos)
 
@@ -74,12 +74,58 @@ poucos, um cordeiro (verde). O usuário pediu para abusar dessa linguagem.
 - `src/30-art.js`: traço vetorial via Path2D: `wolf`, `lamb`, `human` (5 cabelos, óculos, terno/blusa, `sash` = faixa presidencial), `eyesInDark`, `claws`, `congressLine`, `flagLine`, `crack`, `podium`, `phone`, ícones.
 - `src/40-kv.js`: `crowd()` (fileiras com neblina; `kind(i,row,x,y,rr)` escolhe humano/lobo/cordeiro com posições estáveis por seed), `CROWD` compartilhado entre as cenas 4–6, e o array `KV`.
 - `src/70-post.js`: pós em WebGL2 (motion blur por acumulação, CA, bloom por mipmap, grain, vinheta); `postStill(dark)`.
-- `src/90-main.js`: por enquanto só o visualizador de quadros (`?kv=N`, `window.__kv`).
+- `src/50-dark.js`: cenas 1-5 e utilitários de movimento (`hlA` = headline animado, `typeLine`, `kickerType`, `tagPop`, `tvOff`, `shake`, `cam`).
+- `src/60-light.js`: cenas 6-9, `whip`, montagem do logo a partir do disco do cronômetro.
+- `src/80-audio.js`: trilha, efeitos, ducking, render offline (`audioWav`) e reprodução ao vivo.
+- `src/90-main.js`: despachante de cenas (`drawScene`), `renderFrame` com sub-quadros de motion blur, player, `window.__reel` e `window.__kv`.
 
 Build: `node tools/build.mjs`. Quadros: `python tools/keyvisuals.py --out <pasta>` (PNG por quadro + `board.png`).
 Dependências no ambiente: `pip install playwright==1.56.0 imageio-ffmpeg pillow numpy` (o Chromium já está em `/opt/pw-browsers`).
 
-## Plano de animação
+## Como assistir, gravar e renderizar
+
+- **Assistir / gravar a tela:** abra `index.html` no Chrome (funciona direto do disco; a narração está
+  embutida). Espere o botão amarelo (o som é pré-mixado em ~5 s), clique e grave. Espaço/Enter reinicia,
+  F ou duplo clique = tela cheia, M = mudo; o cursor some durante a reprodução e o último quadro fica
+  parado no fim. Ao vivo não há motion blur de sub-quadros; se a máquina engasgar, o áudio segue certo e
+  a imagem acompanha o relógio do áudio.
+- **Conferir um instante:** `index.html?t=38.5` (quadro fixo) e `index.html?kv=6` (quadro-chave aprovado).
+- **Folha de contato:** `python tools/render.py --sheet 4.7,13.8,34.6 --out folha.png` (`--scale`, `--cols`,
+  `--blur 1` para sem motion blur).
+- **Som:** `python tools/render.py --audio-only --out mix.wav` (`--parts score|music|fx|voice` para stems).
+- **MP4 final:** `python tools/render.py` → `ranking-alerta.mp4` (1080x1920, 30 fps, 4 sub-quadros de
+  motion blur, 12-24 nas transições rápidas; ~15-20 min com `--jobs 3` em 4 CPUs). O vídeo não é versionado.
+
+## O que foi feito (animação)
+
+Cada cena entra no seu KV nas palavras da narração, segura e sai na pausa seguinte. Cortes: 9.85, 13.62,
+25.63, 32.32, 38.1, 41.75 (whip para o céu), 52.95, 59.17 (`SC` em `src/00-core.js`). Golpes nas sílabas
+medidas por envelope de energia: NÃO 4.70 / VÁ 5.27 / VOTAR 5.55; garras em "imPOSto" 16.93 e "FALta"
+19.52; "ou tira" 22.89 rasga o cartão do direito; fileiras entram de frente para trás nas sílabas de
+"centenas de nomes, centenas de sorrisos"; lâmpada acende em "Ranking" 39.18; critérios em 42.44 / 43.31 /
+44.24 / 45.63; nota conta em "de zero a dez" 48.99; anos em "quatro anos" 57.68-58.31; "dia quatro" 64.72
+acende a data.
+
+Linguagem de movimento: um protagonista por vez, entradas com ease-out forte (expo), saídas com ease-in,
+câmera em deriva lenta com parallax (a multidão das cenas 4-5 é uma só: fileiras da frente andam mais),
+tipografia por máscara com stagger curto; o golpe seco ("hit", 1.35 → 1) só em NÃO VÁ VOTAR. Transições
+motivadas: TV desligando (1→2), olhos que se abrem (2→3), corte com glitch (3→4), a mesma multidão (4→5),
+luzes apagam e o céu da marca desce (5→6), whip para o céu (6→7), o anel do cronômetro vira o disco do
+logo, que recebe capitel e barras e desliza para o lockup (8→9).
+
+Mudanças em relação às sugestões abaixo: a varredura da cena 5 vem da **direita para a esquerda** (assim o
+quadro aprovado, máscaras à esquerda e lobos à direita, é um estado da própria varredura); as fileiras da
+cena 4 entram de **frente para trás** (as de trás ficam na neblina e sozinhas não se liam).
+
+Áudio: a narração é embutida no `index.html` pelo `tools/build.mjs` (`VOICE_SRC`) e mixada no mesmo desk
+WebAudio da trilha, então o player e o MP4 soam igual. Música e efeitos têm ducking automático sob cada
+frase (`VO` em `src/00-core.js`). Calibração (`MIX` em `src/80-audio.js`): mix ≈ -13.6 LUFS, voz ≈ -14,
+música 16-20 LU abaixo da voz em cada cena, pico ≈ -2 dBFS.
+
+O player ao vivo desenha as figuras da multidão a partir de bitmaps em cache (`FAST`, `figSprite` em
+`src/40-kv.js`), idênticos ao desenho vetorial; o render do MP4 continua 100% vetorial.
+
+## Plano de animação (original)
 
 Reaproveitar o pipeline do `ranking-reel` (mesma arquitetura):
 

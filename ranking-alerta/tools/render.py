@@ -54,7 +54,8 @@ def open_page(pw, channel):
 
 
 def encode_args(crf):
-    return ['-c:v', 'libx264', '-preset', 'slow', '-crf', str(crf), '-pix_fmt', 'yuv420p', '-profile:v', 'high',
+    # the film grain is incompressible noise: cap the bitrate so the master stays a sane size
+    return ['-c:v', 'libx264', '-preset', 'slow', '-crf', str(crf), '-maxrate', '14M', '-bufsize', '28M', '-pix_fmt', 'yuv420p', '-profile:v', 'high',
             '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
 
 
@@ -94,7 +95,7 @@ def main():
     ap.add_argument('--seconds', type=float, default=None, help='render only N seconds')
     ap.add_argument('--start', type=float, default=0.0)
     ap.add_argument('--channel', default=None, help='chrome / msedge (default: the Chromium bundled with playwright)')
-    ap.add_argument('--crf', type=int, default=17)
+    ap.add_argument('--crf', type=int, default=18)
     ap.add_argument('--no-audio', action='store_true')
     ap.add_argument('--audio-only', action='store_true', help='write the sound as a WAV and stop')
     ap.add_argument('--parts', default='mix', help="audio: 'mix' (voice + score), 'score' or 'voice'")
