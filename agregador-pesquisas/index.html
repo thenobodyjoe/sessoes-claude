@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Agregador de Pesquisas</title>
+<meta name="viewport" content="width=1200">
+<style>
+  @font-face { font-family: "Poppins"; font-weight: 400; src: url(fonts/poppins-latin-400-normal.woff2) format("woff2"); }
+  @font-face { font-family: "Poppins"; font-weight: 500; src: url(fonts/poppins-latin-500-normal.woff2) format("woff2"); }
+  @font-face { font-family: "Poppins"; font-weight: 600; src: url(fonts/poppins-latin-600-normal.woff2) format("woff2"); }
+  @font-face { font-family: "Poppins"; font-weight: 700; src: url(fonts/poppins-latin-700-normal.woff2) format("woff2"); }
+  @font-face { font-family: "Poppins"; font-weight: 800; src: url(fonts/poppins-latin-800-normal.woff2) format("woff2"); }
+
+  :root {
+    --surface:        #0d1627;  /* validated chart surface */
+    --surface-deep:   #080f1c;
+    --text-primary:   #ffffff;
+    --text-secondary: #a9b5c9;
+    --text-muted:     #6d7a91;
+    --grid:           #1a2539;
+    --baseline:       #2c3a54;
+    --hairline:       #1e2a40;
+    /* categorical slots 1–3, dark steps — validated all-pairs on --surface */
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1200px; height: 628px; overflow: hidden; background: var(--surface-deep); }
+  body {
+    font-family: "Poppins", system-ui, sans-serif;
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .card {
+    position: relative;
+    width: 1200px; height: 628px;
+    overflow: hidden;
+    background:
+      radial-gradient(640px 420px at 860px 300px, rgba(57,135,229,0.10), transparent 70%),
+      radial-gradient(520px 380px at 120px 620px, rgba(25,158,112,0.05), transparent 70%),
+      linear-gradient(160deg, #0f1a2e 0%, var(--surface) 45%, var(--surface-deep) 100%);
+  }
+  .grain { position: absolute; inset: 0; opacity: .05; mix-blend-mode: overlay; pointer-events: none; }
+
+  /* ---------- left column ---------- */
+  .copy {
+    position: absolute; left: 64px; top: 56px; bottom: 56px; width: 440px;
+    display: flex; flex-direction: column;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    font-size: 12.5px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--text-primary);
+  }
+  .brand .mark { display: block; }
+  .brand .sep { width: 1px; height: 14px; background: #34425c; }
+  .brand .year { color: var(--text-secondary); font-weight: 500; }
+
+  .headline { margin-top: auto; }
+  h1 {
+    font-weight: 700;
+    font-size: 60px; line-height: 1.04; letter-spacing: -0.025em;
+  }
+  h1 .soft { color: var(--text-secondary); font-weight: 600; }
+  .lede {
+    margin-top: 22px; max-width: 410px;
+    font-size: 18px; line-height: 1.55; font-weight: 400;
+    color: var(--text-secondary);
+  }
+  .lede strong { color: var(--text-primary); font-weight: 600; }
+
+  .key {
+    margin-top: auto;
+    padding-top: 22px; border-top: 1px solid var(--hairline);
+    display: grid; grid-template-columns: auto auto; column-gap: 32px;
+    width: max-content;
+  }
+  .key div { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 500; color: #d3dbe8; }
+
+  /* ---------- chart ---------- */
+  svg.chart { position: absolute; left: 0; top: 0; }
+  .tick   { font: 500 12px "Poppins", sans-serif; fill: var(--text-muted); }
+  .month  { font: 600 11px "Poppins", sans-serif; fill: var(--text-muted); letter-spacing: .12em; }
+  .ctitle { font: 600 11.5px "Poppins", sans-serif; fill: var(--text-secondary); letter-spacing: .14em; }
+  .elect  { font: 600 11px "Poppins", sans-serif; fill: var(--text-primary); letter-spacing: .12em; }
+  .elect-sub { font: 500 11px "Poppins", sans-serif; fill: var(--text-secondary); letter-spacing: .06em; }
+  .val    { font: 700 25px "Poppins", sans-serif; fill: var(--text-primary); letter-spacing: -0.02em; }
+  .name   { font: 500 12.5px "Poppins", sans-serif; fill: var(--text-secondary); }
+  .note   { font: 500 10.5px "Poppins", sans-serif; fill: var(--text-muted); letter-spacing: .04em; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+
+  <svg class="grain" width="1200" height="628" aria-hidden="true">
+    <filter id="n"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+    <rect width="100%" height="100%" filter="url(#n)"/>
+  </svg>
+
+  <svg class="chart" id="chart" width="1200" height="628" role="img"
+       aria-label="Gráfico ilustrativo: pesquisas individuais como pontos e a média agregada como linha para três candidatos, de abril a setembro."></svg>
+
+  <section class="copy">
+    <div class="brand">
+      <svg class="mark" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+        <rect x="1"  y="12" width="5" height="9"  rx="1.5" fill="#fff" opacity=".45"/>
+        <rect x="8.5" y="4" width="5" height="17" rx="1.5" fill="#fff"/>
+        <rect x="16" y="8"  width="5" height="13" rx="1.5" fill="#fff" opacity=".7"/>
+      </svg>
+      <span>Ranking dos Políticos</span>
+      <span class="sep"></span>
+      <span class="year">Eleições 2026</span>
+    </div>
+
+    <div class="headline">
+      <h1>Agregador<br><span class="soft">de</span> Pesquisas</h1>
+      <p class="lede">Todas as pesquisas eleitorais reunidas em uma só média — para enxergar <strong>a tendência, não o ruído.</strong></p>
+    </div>
+
+    <div class="key">
+      <div>
+        <svg width="30" height="20" viewBox="0 0 30 20" aria-hidden="true">
+          <g fill="#7f8ba1" stroke="#0d1627" stroke-width="1.5">
+            <circle cx="4" cy="12" r="3.5"/><circle cx="11" cy="6" r="3.5"/><circle cx="15" cy="15" r="3.5"/>
+            <circle cx="21" cy="8" r="3.5"/><circle cx="26" cy="13" r="3.5"/>
+          </g>
+        </svg>
+        Cada ponto é uma pesquisa
+      </div>
+      <div>
+        <svg width="30" height="20" viewBox="0 0 30 20" aria-hidden="true">
+          <path d="M2 15 C 9 15, 11 6, 17 7 S 25 4, 28 4" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+        </svg>
+        A linha é a média
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("chart");
+  const css = getComputedStyle(document.documentElement);
+  const tok = n => css.getPropertyValue(n).trim();
+  const SURFACE = tok("--surface");
+
+  const el = (tag, attrs, parent = svg) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    parent.appendChild(e);
+    return e;
+  };
+
+  // ---- geometry -------------------------------------------------------
+  const X0 = 606, X1 = 1012;          // plot: Apr 1 → Oct 4 (election day)
+  const V0 = 10, V1 = 45;             // y-domain (line chart: non-zero base is fine)
+  const Y0 = 536, Y1 = 128;
+  const DAYS = 186;                   // Apr 1 → Oct 4
+  const TODAY = 177;                  // Sep 25
+  const x = d => X0 + (d / DAYS) * (X1 - X0);
+  const y = v => Y0 - ((v - V0) / (V1 - V0)) * (Y0 - Y1);
+
+  // ---- illustrative data (seeded, not real polling) -------------------
+  let seed = 20261004;
+  const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const gauss = () => { let u = 0, v = 0; while (!u) u = rand(); while (!v) v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+  const series = [
+    { name: "Candidato A", color: tok("--series-1"),
+      keys: [[0,34.2],[30,33.1],[61,32.2],[91,33.6],[122,35.5],[153,37.1],[177,38.4]] },
+    { name: "Candidato B", color: tok("--series-2"),
+      keys: [[0,23.6],[30,25.1],[61,26.6],[91,27.4],[122,29.0],[153,30.4],[177,31.2]] },
+    { name: "Candidato C", color: tok("--series-3"),
+      keys: [[0,21.8],[30,22.0],[61,20.9],[91,19.8],[122,18.8],[153,17.7],[177,16.9]] },
+  ];
+
+  // monotone cubic (Fritsch–Carlson) through the keyframes
+  const monotone = keys => {
+    const n = keys.length, xs = keys.map(k => k[0]), ys = keys.map(k => k[1]);
+    const d = [], m = [];
+    for (let i = 0; i < n - 1; i++) d[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+    m[0] = d[0]; m[n - 1] = d[n - 2];
+    for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+    for (let i = 0; i < n - 1; i++) {
+      if (d[i] === 0) { m[i] = m[i + 1] = 0; continue; }
+      const a = m[i] / d[i], b = m[i + 1] / d[i], s = a * a + b * b;
+      if (s > 9) { const t = 3 / Math.sqrt(s); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i]; }
+    }
+    return t => {
+      let i = Math.min(n - 2, Math.max(0, xs.findIndex((v, j) => t >= v && t <= xs[j + 1])));
+      const h = xs[i + 1] - xs[i], u = (t - xs[i]) / h;
+      const h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u, h01 = -2*u*u*u + 3*u*u, h11 = u*u*u - u*u;
+      return h00 * ys[i] + h10 * h * m[i] + h01 * ys[i + 1] + h11 * h * m[i + 1];
+    };
+  };
+  series.forEach(s => s.f = monotone(s.keys));
+
+  // poll dates: denser as the election approaches
+  const polls = [];
+  for (let i = 0; i < 64; i++) {
+    const u = rand();
+    polls.push(Math.round(TODAY * (1 - Math.pow(1 - u, 1.7))));
+  }
+  polls.push(2, 175, 172);
+  polls.sort((a, b) => a - b);
+
+  // ---- chrome -----------------------------------------------------------
+  el("text", { x: X0, y: 71, class: "ctitle" }).textContent = "INTENÇÃO DE VOTO · 1º TURNO";
+
+  for (let v = 10; v <= 40; v += 10) {
+    el("line", { x1: X0, x2: X1, y1: y(v), y2: y(v),
+      stroke: tok("--grid"), "stroke-width": 1, "shape-rendering": "crispEdges" });
+    const t = el("text", { x: X0 - 12, y: y(v) + 4, "text-anchor": "end", class: "tick" });
+    t.textContent = v + "%";
+  }
+
+  // months, centred in their span
+  const months = [["ABR",0,30],["MAI",30,61],["JUN",61,91],["JUL",91,122],["AGO",122,153],["SET",153,183]];
+  months.forEach(([m, a, b]) => {
+    el("text", { x: x((a + b) / 2), y: Y0 + 30, "text-anchor": "middle", class: "month" }).textContent = m;
+  });
+
+  // election-day marker
+  el("line", { x1: X1, x2: X1, y1: Y1 - 10, y2: Y0, stroke: "#3b4c6b", "stroke-width": 1, "shape-rendering": "crispEdges" });
+  el("text", { x: X1, y: Y1 - 32, "text-anchor": "middle", class: "elect" }).textContent = "ELEIÇÃO";
+  el("text", { x: X1, y: Y1 - 16, "text-anchor": "middle", class: "elect-sub" }).textContent = "4 de outubro";
+
+  // ---- data layers --------------------------------------------------------
+  const mix = (hex, bg, w) => {
+    const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+    const a = p(hex), b = p(bg);
+    return "rgb(" + a.map((c, i) => Math.round(c * w + b[i] * (1 - w))).join(",") + ")";
+  };
+  const trendPath = (f, off = 0, from = 0, to = TODAY, rev = false) => {
+    const pts = [];
+    for (let d = from; d <= to; d += 1) pts.push([x(d), y(f(d) + off)]);
+    if (rev) pts.reverse();
+    return pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  };
+
+  const gBands = el("g", {}), gDots = el("g", {}), gLines = el("g", {}), gEnds = el("g", {}), gLabels = el("g", {});
+
+  series.forEach(s => {
+    // uncertainty band
+    el("path", {
+      d: trendPath(s.f, 2.3) + " " + trendPath(s.f, -2.3, 0, TODAY, true).replace("M", "L") + " Z",
+      fill: s.color, "fill-opacity": 0.13
+    }, gBands);
+  });
+
+  // individual polls (integer-rounded, like published results)
+  polls.forEach(d => {
+    series.forEach(s => {
+      const v = Math.round(s.f(d) + gauss() * 1.75);
+      el("circle", { cx: x(d).toFixed(1), cy: y(v).toFixed(1), r: 4,
+        fill: mix(s.color, SURFACE, 0.55), stroke: SURFACE, "stroke-width": 1.5 }, gDots);
+    });
+  });
+
+  series.forEach(s => {
+    const d = trendPath(s.f);
+    el("path", { d, fill: "none", stroke: SURFACE, "stroke-width": 8, "stroke-linecap": "round", "stroke-linejoin": "round", "stroke-opacity": .9 }, gLines);
+    el("path", { d, fill: "none", stroke: s.color, "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round" }, gLines);
+
+    const ex = x(TODAY), ey = y(s.f(TODAY));
+    el("circle", { cx: ex, cy: ey, r: 6.5, fill: s.color, stroke: SURFACE, "stroke-width": 3 }, gEnds);
+
+    // direct end label: value + name, in text tokens
+    const lx = X1 + 16;
+    const val = s.f(TODAY).toFixed(1).replace(".", ",") + "%";
+    el("text", { x: lx, y: ey + 7, class: "val" }, gLabels).textContent = val;
+    el("text", { x: lx, y: ey + 27, class: "name" }, gLabels).textContent = s.name;
+  });
+
+  el("text", { x: 1136, y: Y0 + 30, "text-anchor": "end", class: "note" }).textContent = "Dados ilustrativos";
+})();
+</script>
+</body>
+</html>
