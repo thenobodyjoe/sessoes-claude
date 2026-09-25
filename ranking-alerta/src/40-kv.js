@@ -4,6 +4,7 @@
 // ============================================================
 
 // a crowd of politicians in rows receding into the fog. kind(i, row) -> 'human' | 'wolf' | 'lamb'
+// o.fx(k, row, x, y, rr, kind) -> { a, dx, dy, glow } animates each figure (all optional)
 function crowd(ctx, t, kind, o) {
   o = o || {};
   const rows = [];
@@ -17,21 +18,34 @@ function crowd(ctx, t, kind, o) {
     const fog = Math.pow(0.72, ri);
     for (let i = 0; i < n; i++) {
       const x = x0 + i * pitch + (r() - 0.5) * 18 * s, yy = y + (r() - 0.5) * 10 * s, v = Math.floor(r() * 5 + ri * 3 + i), rr = r();
-      const k = kind(idx++, ri, x, yy, rr);
+      const k = kind(idx, ri, x, yy, rr);
+      const f = o.fx ? o.fx(idx, ri, x, yy, rr, k) : null;
+      idx++;
+      if (f && f.a !== undefined && f.a <= 0.002) continue;
+      const fx = x + ((f && f.dx) || 0), fy = yy + ((f && f.dy) || 0), gk = f && f.glow !== undefined ? f.glow : 1;
       const lw = Math.max(1.4, 3.2 * s);
       const bg = mix(D.void, D.ink, 0.5);
+      const heat = (f && f.heat) || 0;
       ctx.save();
-      ctx.globalAlpha = 0.25 + 0.75 * fog;
+      ctx.globalAlpha *= (0.25 + 0.75 * fog) * (f && f.a !== undefined ? f.a : 1);
       if (k === 'human') {
-        if (o.shadowWolves && rr < 0.35 && ri < 3) {
+        const sw = o.shadowWolves === true ? 1 : (o.shadowWolves || 0);
+        if (sw > 0 && rr < 0.35 && ri < 3) {
           // the shadow on the wall gives it away
-          ctx.save(); ctx.globalAlpha *= 0.55;
-          fillAt(ctx, WOLF.head, x + 26 * s, yy - 58 * s, s * 0.86, rgba(D.wine, 0.8));
+          ctx.save(); ctx.globalAlpha *= 0.55 * sw;
+          fillAt(ctx, WOLF.head, fx + 26 * s, fy - 58 * s, s * 0.86, rgba(D.wine, 0.8));
           ctx.restore();
         }
-        human(ctx, x, yy, { s, lw, variant: v, color: mix(D.ash, D.bone, fog), bg });
-      } else if (k === 'wolf') wolf(ctx, x, yy, { s, lw, variant: v, color: mix(D.wine, D.red, fog), bg, eyeGlow: 12 + 14 * fog });
-      else lamb(ctx, x, yy, { s, lw, variant: v, color: D.lamb, bg, glow: 14 * fog });
+      }
+      const draw = (c, x, y) => {
+        if (k === 'human') human(c, x, y, { s, lw, variant: v, color: mix(D.ash, D.bone, fog), bg });
+        else if (k === 'wolf') wolf(c, x, y, { s, lw, variant: v, color: heat ? mix(mix(D.wine, D.red, fog), D.hot, heat) : mix(D.wine, D.red, fog), bg, eyeGlow: (12 + 14 * fog) * gk });
+        else lamb(c, x, y, { s, lw, variant: v, color: D.lamb, bg, glow: 14 * fog * gk });
+      };
+      if (o.sprites && !heat && gk === 1) {
+        const sp = figSprite(`${k}|${v % 15}|${s.toFixed(4)}|${fog.toFixed(4)}`, s, draw);
+        ctx.drawImage(sp.c, fx - sp.ox, fy - sp.oy);
+      } else draw(ctx, fx, fy);
       ctx.restore();
     }
   }
@@ -39,6 +53,19 @@ function crowd(ctx, t, kind, o) {
   const g = ctx.createLinearGradient(0, rows[rows.length - 1].y - 200, 0, rows[2].y);
   g.addColorStop(0, rgba(D.void, 0.95)); g.addColorStop(1, rgba(D.void, 0));
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, rows[2].y);
+}
+// the live player draws each figure from a cached bitmap (same pixels, a fraction of the cost)
+const SPRITES = new Map();
+function figSprite(key, s, draw) {
+  let sp = SPRITES.get(key);
+  if (!sp) {
+    const pad = 40, c = document.createElement('canvas');
+    c.width = Math.ceil(300 * s + pad * 2); c.height = Math.ceil(350 * s + pad * 2);
+    sp = { c, ox: c.width / 2, oy: pad + 155 * s };
+    draw(c.getContext('2d'), sp.ox, sp.oy);
+    SPRITES.set(key, sp);
+  }
+  return sp;
 }
 const isLamb = rr => rr > 0.8;          // about one in five
 const CROWD = { front: 1640, s0: 1.15, rows: 7, seed: 3 };

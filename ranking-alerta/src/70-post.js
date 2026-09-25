@@ -123,6 +123,26 @@ function glPost(fromAcc, P) {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
+// the lens over time: grainier and darker at the edges in the broadcast, clean in the Ranking's world.
+// Glitch and aberration only on the few hits that earn them.
+const HITS = [[4.70, 0.35, 0.010], [5.55, 0.6, 0.016], [22.89, 0.5, 0.014], [36.69, 0.22, 0.008]];
+function postAt(t) {
+  const light = smoothstep(38.2, 38.7, t);
+  let ca = lerp(0.004, 0.0025, light), glitch = 0;
+  for (const [h, g, c] of HITS) {
+    if (t >= h && t < h + 0.2) glitch = Math.max(glitch, g * (1 - (t - h) / 0.2));
+    ca += c * kick(t, h, 7);
+  }
+  if (t > 9.5 && t < 9.85) glitch = Math.max(glitch, 0.45 * seg(t, 9.5, 9.62));   // the broadcast dies
+  if (t > 25.45 && t < 25.72) { glitch = Math.max(glitch, 0.6 * (1 - seg(t, 25.55, 25.72))); ca += 0.012; }
+  let flash = [1, 1, 1, 0];
+  const fl = (t0, c, a, r) => { const k = a * kick(t, t0, r); if (k > flash[3]) flash = [c[0], c[1], c[2], k]; };
+  fl(10.07, [1, 0.95, 0.9], 0.12, 9);     // the spotlight
+  fl(39.18, [1, 0.93, 0.7], 0.18, 5);    // the lamp
+  fl(59.17, [1, 1, 1], 0.1, 7);           // the watch becomes the mark
+  return { time: t, ca, glitch, flash, seed: Math.floor(t * 30), grain: lerp(0.055, 0.03, light), vig: lerp(0.7, 0.45, light), bloom: lerp(0.45, 0.5, light) };
+}
+
 // lens settings for a still (dark world: heavier grain and vignette)
 function postStill(dark, t) {
   return dark ? { time: t, ca: 0.004, glitch: 0, flash: [0, 0, 0, 0], seed: 1, grain: 0.055, vig: 0.7, bloom: 0.45 }

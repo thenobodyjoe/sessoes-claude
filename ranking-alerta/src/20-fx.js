@@ -36,15 +36,18 @@ function smoke(ctx, t, a, seed, y0, y1) {
   ctx.restore();
 }
 // scattered pairs of wolf eyes in the dark (avoid a rectangle, e.g. the text block)
-function eyesField(ctx, t, n, seed, a, avoid, sMin, sMax) {
+// open(k) -> 0..1 lets the k-th pair open on its own clock
+function eyesField(ctx, t, n, seed, a, avoid, sMin, sMax, open) {
   const r = mulberry(seed);
   let placed = 0, guard = 0;
   while (placed < n && guard++ < 400) {
     const x = 60 + r() * (W - 120), y = 140 + r() * (H - 280), s = lerp(sMin || 0.18, sMax || 0.42, r()), ph = r() * 20;
     if (avoid && x > avoid[0] && x < avoid[2] && y > avoid[1] && y < avoid[3]) continue;
-    const blink = Math.abs(Math.sin(t * 0.7 + ph)) > 0.985 ? 0.1 : 1;
+    const op = open ? open(placed) : 1;
+    if (op <= 0) { placed++; continue; }
+    const blink = (Math.abs(Math.sin(t * 0.7 + ph)) > 0.985 ? 0.1 : 1) * Math.min(1, E.outBack(op, 2.5));
     const flick = 0.55 + 0.45 * Math.sin(t * 1.3 + ph * 3);
-    eyesInDark(ctx, x, y, s, (a === undefined ? 1 : a) * flick * (0.4 + 0.6 * s / (sMax || 0.42)), blink);
+    eyesInDark(ctx, x, y, s, (a === undefined ? 1 : a) * flick * (0.4 + 0.6 * s / (sMax || 0.42)) * Math.min(1, op * 2), blink);
     placed++;
   }
 }

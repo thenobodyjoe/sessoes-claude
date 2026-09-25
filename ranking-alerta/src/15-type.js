@@ -60,7 +60,7 @@ function kLine(ctx, b, o) {
   for (let i = 0; i < n; i++) {
     const ch = o.text[i];
     if (ch === ' ') continue;
-    const bi = o.tIn + i * st;
+    const bi = o.ats ? o.ats[i] : o.tIn + i * st;
     const pIn = seg(b, bi, bi + dur);
     let pOut = 0;
     if (o.tOut !== undefined) { const bo = o.tOut + i * (o.outStagger === undefined ? st * 0.6 : o.outStagger); pOut = seg(b, bo, bo + (o.outDur || 0.5)); }
@@ -70,6 +70,7 @@ function kLine(ctx, b, o) {
     else if (style === 'drop') { dy = -(1 - E.outExpo(pIn)) * size * 1.1; }
     else if (style === 'pop') { sc = E.outBack(pIn, 2.2); al = Math.min(1, pIn * 4); rot = (1 - E.outCubic(pIn)) * (hash(i + n) - 0.5) * 0.9; }
     else if (style === 'slam') { const q = E.outExpo(pIn); sc = lerp(2.6, 1, q); al = Math.min(1, pIn * 5); }
+    else if (style === 'hit') { sc = lerp(1.35, 1, E.outExpo(pIn)); al = Math.min(1, pIn * 9); }
     if (pOut > 0) {
       const q = E.inExpo(pOut);
       if (o.outStyle === 'fall') dy += q * size * 1.2;

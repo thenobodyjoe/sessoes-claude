@@ -7,6 +7,17 @@
 const W = 1080, H = 1920;
 const TAU = Math.PI * 2;
 
+// The piece is a pure function of t (seconds) on the same clock as narracao.mp3 (65.36 s).
+const DUR = 65.36;
+let FAST = false;     // live playback: allow cached bitmaps where they are indistinguishable
+// phrases of the voice-over [start, end] (ffmpeg silencedetect); the music ducks under each one
+const VO = [[0.06, 2.69], [3.05, 4.53], [4.69, 6.10], [6.51, 9.56], [10.07, 13.18], [13.70, 15.74], [15.96, 18.29],
+  [18.55, 21.17], [21.40, 22.65], [22.89, 23.56], [23.78, 25.45], [25.81, 27.70], [27.93, 29.56], [29.73, 32.13],
+  [32.50, 34.88], [35.17, 37.88], [38.31, 41.43], [41.77, 43.14], [43.30, 44.06], [44.23, 45.34], [45.49, 47.07],
+  [47.27, 48.78], [48.99, 50.23], [50.42, 51.52], [51.69, 52.77], [53.12, 55.04], [55.35, 59.01], [59.32, 61.01], [61.29, 65.26]];
+// scene cuts, each in a pause of the voice
+const SC = { chamado: 0, palco: 9.85, congresso: 13.62, sorrisos: 25.63, mascaras: 32.32, virada: 38.1, nota: 41.75, tempo: 52.95, fim: 59.17 };
+
 // the dark world
 const D = {
   void: '#050203', ink: '#0E0506', deep: '#1A0709', blood: '#4A0A10', wine: '#7A0F18',
@@ -57,6 +68,20 @@ function mix(a, b, t) {
   return `rgb(${Math.round(lerp(x[0], y[0], t))},${Math.round(lerp(x[1], y[1], t))},${Math.round(lerp(x[2], y[2], t))})`;
 }
 function rgba(h, a) { const x = rgbOf(h); return `rgba(${x[0]},${x[1]},${x[2]},${a})`; }
+// position along keyed points [[t, x, y], ...] on gentle arcs
+function pathAt(keys, t, e) {
+  if (t <= keys[0][0]) return [keys[0][1], keys[0][2]];
+  for (let i = 1; i < keys.length; i++) {
+    const k0 = keys[i - 1], k1 = keys[i];
+    if (t <= k1[0]) {
+      const u = (e || E.inOutCubic)(seg(t, k0[0], k1[0]));
+      const mx = (k0[1] + k1[1]) / 2 + (k1[2] - k0[2]) * 0.18, my = (k0[2] + k1[2]) / 2 - (k1[1] - k0[1]) * 0.18;
+      return [(1 - u) * (1 - u) * k0[1] + 2 * (1 - u) * u * mx + u * u * k1[1], (1 - u) * (1 - u) * k0[2] + 2 * (1 - u) * u * my + u * u * k1[2]];
+    }
+  }
+  const k = keys[keys.length - 1];
+  return [k[1], k[2]];
+}
 function rrect(ctx, x, y, w, h, r) {
   r = Math.max(0, Math.min(r, w / 2, h / 2));
   ctx.beginPath();
