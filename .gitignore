@@ -1,0 +1,8 @@
+# rendered media (too large for GitHub) and third-party reference footage
+*.mp4
+*.wav
+smooth criminal/clip*.mp4
+# scratch output from renders
+render.log
+sheet.png
+node_modules/

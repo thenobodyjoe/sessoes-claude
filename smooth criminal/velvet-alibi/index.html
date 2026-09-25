@@ -1,0 +1,3049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Velvet Alibi</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #08070c; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="paint" role="img" aria-label="A thirty-second moving oil painting with music: a smoky nineteen-thirties speakeasy with blue windows and orange lamps, where a man in a cream suit and white fedora strides into a spotlight, is joined by a line of dancers in dark suits, and finishes with an impossible forward lean."></canvas>
+<script>
+// ---- 00-core.js
+"use strict";
+// ============================================================
+// Timing: 14 bars of 4/4 at 112 BPM = 30.0 s.
+// Piece time t runs 0..60 and loops. On the very first play it starts
+// at -INTRO, while the title lifts off and the nocturne paints itself in.
+// ============================================================
+const TAU = Math.PI * 2;
+const BPM = 112;
+const BEAT = 60 / BPM;
+const BAR = 4 * BEAT;
+const NBARS = 14;
+const NBEATS = NBARS * 4;
+const DUR = NBARS * BAR;
+const INTRO = 0;
+// stroke paint-in / lift-off sentinels: 'always painted' and 'never lifted'
+const NO_IN = -1e4, NO_OUT = 1e4;
+const REDUCED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
+const lerp = (a, b, t) => a + (b - a) * t;
+const smoothstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+const seg = (x, a, b) => clamp((x - a) / (b - a), 0, 1);
+const hash = n => { const s = Math.sin(n * 12.9898 + 78.233) * 43758.5453; return s - Math.floor(s); };
+const noise1 = x => { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return lerp(hash(i), hash(i + 1), u) * 2 - 1; };
+function mulberry(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const modT = t => ((t % DUR) + DUR) % DUR;
+
+// easing
+function easeInOutBack(t, s) {
+  const c = (s === undefined ? 1.2 : s) * 1.525;
+  t *= 2;
+  if (t < 1) return (t * t * ((c + 1) * t - c)) / 2;
+  t -= 2;
+  return (t * t * ((c + 1) * t + c) + 2) / 2;
+}
+function easeOutBack(t, s) {
+  const c = s === undefined ? 1.70158 : s;
+  t -= 1;
+  return t * t * ((c + 1) * t + c) + 1;
+}
+const easeInOut = t => t * t * (3 - 2 * t);
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+const easeInCubic = t => t * t * t;
+const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const bump = (x, c, w) => Math.exp(-((x - c) * (x - c)) / (2 * w * w));
+
+// ---------- 3D vectors (y up, x = screen right, z = toward camera)
+const V = (x, y, z) => ({ x, y, z });
+const vadd = (a, b) => V(a.x + b.x, a.y + b.y, a.z + b.z);
+const vsub = (a, b) => V(a.x - b.x, a.y - b.y, a.z - b.z);
+const vmul = (a, s) => V(a.x * s, a.y * s, a.z * s);
+const vmad = (a, b, s) => V(a.x + b.x * s, a.y + b.y * s, a.z + b.z * s);
+const vdot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+const vcross = (a, b) => V(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+const vlen = a => Math.hypot(a.x, a.y, a.z);
+const vnorm = a => { const l = vlen(a) || 1; return V(a.x / l, a.y / l, a.z / l); };
+const vlerp = (a, b, t) => V(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+
+// ---------- 3x3 rotations, row-major. R = Ry(yaw) * Rx(pitch) * Rz(roll)
+// yaw>0 turns the front (+z) toward +x, pitch>0 leans the top toward the camera (nod),
+// roll>0 tilts the top toward screen-left.
+function rotYXZ(yaw, pitch, roll) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cx = Math.cos(pitch), sx = Math.sin(pitch),
+        cz = Math.cos(roll), sz = Math.sin(roll);
+  return [
+    cy * cz + sy * sx * sz, -cy * sz + sy * sx * cz, sy * cx,
+    cx * sz, cx * cz, -sx,
+    -sy * cz + cy * sx * sz, sy * sz + cy * sx * cz, cy * cx
+  ];
+}
+const mv = (m, v) => V(m[0] * v.x + m[1] * v.y + m[2] * v.z, m[3] * v.x + m[4] * v.y + m[5] * v.z, m[6] * v.x + m[7] * v.y + m[8] * v.z);
+const mvT = (m, v) => V(m[0] * v.x + m[3] * v.y + m[6] * v.z, m[1] * v.x + m[4] * v.y + m[7] * v.z, m[2] * v.x + m[5] * v.y + m[8] * v.z);
+function mm(a, b) {
+  const r = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+    r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+  return r;
+}
+// origin + R * (x,y,z)
+const xf = (o, R, x, y, z) => V(o.x + R[0] * x + R[1] * y + R[2] * z, o.y + R[3] * x + R[4] * y + R[5] * z, o.z + R[6] * x + R[7] * y + R[8] * z);
+
+// color helpers
+const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const scalec = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+
+// ---- 10-gl.js
+// ============================================================
+// WebGL2: stroke renderer (MRT colour + paint height) and composite
+// ============================================================
+const cv = document.getElementById('paint');
+const gl = cv.getContext('webgl2', {
+  antialias: false, alpha: false, depth: false, stencil: false,
+  premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance'
+});
+if (!gl) {
+  document.body.innerHTML = '<p style="color:#cbb;font:16px/1.5 Georgia,serif;padding:2em">This painting needs WebGL2 to move.</p>';
+  throw new Error('WebGL2 unavailable');
+}
+const HAS_CBF = !!gl.getExtension('EXT_color_buffer_float');
+cv.addEventListener('webglcontextlost', e => e.preventDefault());
+cv.addEventListener('webglcontextrestored', () => location.reload());
+
+const STROKE_VS = `#version 300 es
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec2 a_uv;
+layout(location=2) in vec4 a_p;
+layout(location=3) in vec3 a_rev;
+layout(location=4) in vec4 a_col;
+layout(location=5) in vec4 a_col2;
+layout(location=6) in vec4 a_ex;
+uniform vec2 u_res;
+uniform mat4 u_vp;
+uniform float u_world;
+uniform float u_boil;
+uniform float u_jit;
+out vec2 v_uv; flat out vec4 v_p; flat out vec3 v_rev; out vec4 v_col; flat out vec4 v_col2; flat out vec4 v_ex;
+float h11(float n){ return fract(sin(n * 12.9898) * 43758.5453); }
+void main(){
+  if (u_world > 0.5) {
+    vec3 wp = a_pos;
+    float s = a_p.z;
+    wp.xy += (vec2(h11(s * 7.31 + u_boil * 3.17), h11(s * 3.77 + u_boil * 5.3)) - 0.5) * u_jit;
+    gl_Position = u_vp * vec4(wp, 1.0);
+  } else {
+    vec2 c = a_pos.xy / u_res * 2.0 - 1.0;
+    gl_Position = vec4(c.x, -c.y, 0.0, 1.0);
+  }
+  v_uv = a_uv; v_p = vec4(a_p.x, a_p.y, a_p.z + u_boil * 0.3719, a_p.w); v_rev = a_rev; v_col = a_col; v_col2 = a_col2; v_ex = a_ex;
+}`;
+
+// Each stroke carries two delays (s): when its paint goes on and when it lifts off.
+// u_tIn / u_tOut are the clocks those delays are measured against, so every painted
+// world can be brought in and scraped away on its own schedule.
+const STROKE_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv; flat in vec4 v_p; flat in vec3 v_rev; in vec4 v_col; flat in vec4 v_col2; flat in vec4 v_ex;
+uniform float u_mask;
+uniform float u_tIn, u_tOut;
+layout(location=0) out vec4 o_col;
+layout(location=1) out vec4 o_hgt;
+float h11(float n){ return fract(sin(n * 12.9898) * 43758.5453); }
+float h21(vec2 p){ vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+float vn(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1,0)), u.x), mix(h21(i + vec2(0,1)), h21(i + vec2(1,1)), u.x), u.y); }
+float ease(float x){ x = clamp(x, 0.0, 1.0); return x * x * (3.0 - 2.0 * x); }
+void main(){
+  float k = v_rev.z;                  // stroke units -> css px
+  float W = max(v_p.y * k, 0.5);      // stroke width, css px
+  float u = v_uv.x * k;               // distance along stroke, css px
+  float Lc = v_p.x * k;
+  float v = v_uv.y;                   // across, -1.15..1.15
+  float av = abs(v);
+  float seed = mod(v_p.z, 97.0), th = v_p.w;
+  float kind = floor(v_ex.z * 255.0 + 0.5);
+  float dry = v_col2.a;
+  float aa = max(fwidth(v), 0.002) * 1.1;
+  float t = clamp(u / max(Lc, 1.0), 0.0, 1.0);
+  float bIn = v_rev.x < -5000.0 ? 1.0 : ease((u_tIn - v_rev.x) / 0.3);
+  float aOut = v_rev.y > 5000.0 ? 0.0 : ease((u_tOut - v_rev.y) / 0.30);
+  float uA = aOut * Lc, uB = bIn * Lc;
+  if (u < uA || u > uB || uB <= uA) discard;
+  float cov, br, streak, bid;
+  if (kind < 0.5) {
+    float nb = clamp(W * 0.3, 4.0, 60.0);
+    float bx = (v * 0.5 + 0.5) * nb;
+    bid = floor(bx);
+    float bs = smoothstep(0.0, 1.0, fract(bx));
+    float b1 = mix(h11(bid * 1.713 + seed * 17.17), h11((bid + 1.0) * 1.713 + seed * 17.17), bs);
+    float b2 = vn(vec2(bx * 0.3, seed * 3.1));
+    streak = vn(vec2(u / (W * 1.4 + 8.0) + seed * 5.3, bx * 0.55 + seed));
+    br = clamp(b1 * 0.32 + b2 * 0.33 + streak * 0.5 - 0.07, 0.0, 1.0);
+    float side = step(0.0, v);
+    float en = vn(vec2(u / (W * 1.1 + 6.0), seed * 9.1 + side * 7.0));
+    float edge = 1.0 - 0.13 * en - 0.05 * dry;
+    float ez = smoothstep(0.55, 0.97, av);
+    float bl = h21(vec2(bid + seed * 13.0, floor(u / (W * 0.7 + 4.0))));
+    edge -= ez * step(bl, 0.28 + 0.3 * dry) * 0.3;
+    cov = 1.0 - smoothstep(edge - aa, edge + aa, av);
+    float thr = dry * (0.1 + 0.95 * smoothstep(0.35, 1.0, t)) - 0.05;
+    cov *= smoothstep(thr - 0.06, thr + 0.06, br);
+  } else {
+    bid = 0.0;
+    streak = vn(vec2(u / (W + 10.0), seed));
+    br = 0.45 + 0.3 * streak;
+    cov = 1.0 - smoothstep(0.15, 1.05, av);
+    cov *= cov;
+  }
+  float sq = 1.0 - v_ex.w;
+  float capS = max(W * 0.5 * sq, 1.0);
+  float ds = clamp((u - uA) / capS, 0.0, 1.0);
+  float allowS = sqrt(ds * (2.0 - ds));
+  cov *= 1.0 - smoothstep(allowS - aa, allowS + aa, av);
+  float capE = max(W * 0.35 * sq, 1.0);
+  float de = clamp((uB - u) / capE, 0.0, 1.0);
+  float allowE = sqrt(de * (2.0 - de));
+  cov *= 1.0 - smoothstep(allowE - aa, allowE + aa, av);
+  float a = v_col.a * cov;
+  if (a < 0.004) discard;
+  vec3 c;
+  if (u_mask > 0.5) {
+    c = v_col.rgb;
+  } else {
+    float load = mix(h11(bid * 3.31 + seed * 7.7), h11((bid + 1.0) * 3.31 + seed * 7.7), smoothstep(0.2, 0.8, fract((v * 0.5 + 0.5) * clamp(W * 0.3, 4.0, 60.0))));
+    float m2 = smoothstep(0.4, 0.72, load * 0.6 + streak * 0.5);
+    c = mix(v_col.rgb, v_col2.rgb, m2);
+    c *= 0.8 + 0.4 * br;
+    c *= 1.0 + 0.06 * (1.0 - smoothstep(0.0, 0.15, t));
+  }
+  o_col = vec4(c * a, a);
+  float hg = th * (0.22 + 0.78 * br) * (1.0 - 0.45 * dry * smoothstep(0.4, 1.0, t)) + th * 0.45 * smoothstep(0.62, 0.98, av);
+  o_hgt = vec4(hg * a, v_ex.x * a, v_ex.y * a, a);
+}`;
+
+const COMP_VS = `#version 300 es
+void main(){
+  vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+  gl_Position = vec4(p, 0.0, 1.0);
+}`;
+
+// Pop-art palettes, 10 inks each: 0 ground, 1 coat, 2 coat lining, 3 black clothes, 4 skin,
+// 5 hair, 6 mic/shoes, 7 key-line ink, 8 lips, 9 whites.
+const POP_PALETTES = [
+  [[0.97, 0.35, 0.6], [1.0, 0.87, 0.18], [0.98, 0.52, 0.12], [0.13, 0.2, 0.62], [1.0, 0.74, 0.7], [1.0, 0.45, 0.1], [0.85, 0.88, 0.95], [0.07, 0.05, 0.12], [0.9, 0.1, 0.2], [1.0, 1.0, 0.96]],
+  [[0.2, 0.8, 0.8], [1.0, 0.38, 0.62], [0.7, 0.12, 0.45], [0.1, 0.1, 0.3], [1.0, 0.9, 0.35], [1.0, 0.72, 0.08], [0.95, 0.95, 1.0], [0.08, 0.05, 0.1], [0.95, 0.15, 0.35], [1.0, 1.0, 0.96]],
+  [[1.0, 0.55, 0.1], [0.3, 0.85, 0.85], [0.05, 0.5, 0.55], [0.35, 0.12, 0.55], [1.0, 0.62, 0.72], [1.0, 0.92, 0.2], [0.9, 0.92, 0.98], [0.08, 0.04, 0.12], [0.85, 0.05, 0.25], [1.0, 1.0, 0.96]],
+  [[1.0, 0.9, 0.22], [0.92, 0.16, 0.18], [0.55, 0.05, 0.12], [0.06, 0.07, 0.15], [1.0, 0.86, 0.76], [1.0, 0.5, 0.1], [0.8, 0.85, 0.95], [0.06, 0.04, 0.08], [0.9, 0.1, 0.15], [1.0, 1.0, 0.96]],
+  [[0.62, 0.9, 0.3], [0.58, 0.32, 0.85], [0.3, 0.12, 0.55], [0.05, 0.3, 0.2], [1.0, 0.68, 0.42], [0.95, 0.2, 0.6], [0.92, 0.92, 0.98], [0.06, 0.05, 0.12], [0.95, 0.1, 0.3], [1.0, 1.0, 0.96]],
+  [[0.2, 0.36, 0.92], [1.0, 0.6, 0.18], [0.85, 0.2, 0.1], [0.05, 0.05, 0.08], [1.0, 0.72, 0.8], [1.0, 0.9, 0.25], [0.95, 0.95, 1.0], [0.05, 0.04, 0.1], [0.95, 0.12, 0.25], [1.0, 1.0, 0.96]]
+];
+const glslVec3 = c => `vec3(${c.map(x => x.toFixed(3)).join(',')})`;
+const PAL_GLSL = `const vec3 PAL[60] = vec3[60](${POP_PALETTES.map(p => p.map(glslVec3).join(',')).join(',\n')});`;
+
+const COMP_FS = `#version 300 es
+precision highp float;
+uniform sampler2D u_bgC, u_bgH, u_fgC, u_fgH, u_sh, u_galC, u_galH;
+uniform vec2 u_res;
+uniform float u_dpr;
+uniform vec3 u_amb, u_wCol, u_cCol, u_ground;
+uniform vec4 u_wPool, u_wPool2, u_cPool, u_cPool2;
+uniform float u_grain, u_relief, u_floorY, u_time, u_refl, u_waterY;
+uniform float u_pop, u_grid, u_popSeed;
+uniform float u_gal;
+uniform vec4 u_frame;
+uniform vec3 u_galAmb, u_galWarm;
+uniform vec4 u_galPool;
+uniform vec4 u_flash;
+uniform float u_fade, u_vig;
+out vec4 o;
+${PAL_GLSL}
+float h21(vec2 p){ vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+float pool(vec2 p, vec4 P){
+  vec2 d = (p - P.xy) / max(P.zw, vec2(1.0));
+  float r = length(d);
+  return (1.0 - smoothstep(0.2, 1.0, r)) + 0.35 * (1.0 - smoothstep(0.0, 0.45, r));
+}
+float waterLine(float x){
+  return u_waterY + (sin(x * 0.09 / u_dpr + u_time * 4.0) * 1.3 + sin(x * 0.021 / u_dpr - u_time * 2.1) * 2.0) * u_dpr;
+}
+// Where to read the dancer layer for this pixel: the pop-art prints are all copies of the
+// top-left panel, alternate ones mirrored.
+vec2 fgPos(vec2 fc, out float panel){
+  panel = 0.0;
+  if (u_pop < 0.5 || u_grid < 1.5) return fc;
+  vec2 cell = u_res / u_grid;
+  vec2 ij = min(floor(fc / cell), vec2(u_grid - 1.0));
+  vec2 loc = fc - ij * cell;
+  float row = u_grid - 1.0 - ij.y;
+  panel = ij.x + row * u_grid;
+  if (mod(ij.x + row, 2.0) > 0.5) loc.x = cell.x - loc.x;
+  return vec2(loc.x, u_res.y - cell.y + loc.y);
+}
+// the dancer is hidden below the river surface while he rises out of it
+float fgMask(vec2 fc){
+  if (u_waterY <= 0.0) return 1.0;
+  float wl = waterLine(fc.x);
+  return smoothstep(wl - u_dpr, wl + u_dpr, fc.y);
+}
+float inFrame(vec2 fc){
+  if (u_gal < 0.5) return 1.0;
+  return step(u_frame.x, fc.x) * step(fc.x, u_frame.z) * step(u_frame.y, fc.y) * step(fc.y, u_frame.w);
+}
+float hAt(vec2 fc){
+  float pn;
+  vec2 fp = fgPos(fc, pn);
+  vec4 b = texture(u_bgH, fc / u_res);
+  vec4 f = texture(u_fgH, fp / u_res) * fgMask(fc);
+  float h = (b.r * (1.0 - f.a) + f.r) * inFrame(fc);
+  if (u_gal > 0.5) { vec4 g = texture(u_galH, fc / u_res); h = h * (1.0 - g.a) + g.r; }
+  return h;
+}
+vec3 sceneShade(vec2 fc, vec2 uv, vec4 bc, vec4 bh, vec4 fcol){
+  vec2 sh = texture(u_sh, uv).rg;
+  vec3 alb = bc.rgb + u_ground * (1.0 - bc.a);
+  float recv = bh.a > 0.002 ? clamp(bh.g / bh.a, 0.0, 1.0) : 0.0;
+  float wp = max(pool(fc, u_wPool), pool(fc, u_wPool2)) * (1.0 - sh.r);
+  float cp = max(pool(fc, u_cPool), pool(fc, u_cPool2)) * (1.0 - sh.g);
+  vec3 lightC = u_amb + u_wCol * wp + u_cCol * cp;
+  vec3 bg = mix(alb, alb * lightC, recv * bc.a);
+  // wet ground: a rippled reflection of the dancer below his feet
+  float bgGloss = bh.a > 0.002 ? bh.b / bh.a : 0.0;
+  float below = u_floorY - fc.y;
+  if (below > 0.0 && u_refl > 0.0) {
+    float dd = below / u_res.y;
+    vec2 rp = vec2(fc.x + sin(fc.y * 0.35 / u_dpr + u_time * 5.0) * 2.5 * u_dpr * (0.3 + dd * 6.0), u_floorY + below * 1.1);
+    vec4 rf = texture(u_fgC, rp / u_res) * fgMask(rp);
+    float k = u_refl * smoothstep(0.45, 0.65, bgGloss) * (1.0 - smoothstep(0.0, 0.25, dd)) * recv;
+    bg = bg * (1.0 - rf.a * k) + rf.rgb * k;
+  }
+  return bg * (1.0 - fcol.a) + fcol.rgb;
+}
+vec3 popShade(vec2 fc, vec4 bc, vec4 fcol, vec4 fh, float pn, vec2 fp){
+  int base = int(mod(pn + u_popSeed, 6.0)) * 10;
+  float bl = bc.a > 0.01 ? dot(bc.rgb / bc.a, vec3(0.3, 0.5, 0.2)) : 0.5;
+  vec3 back = PAL[base] * (0.8 + 0.4 * bl);
+  vec3 c = back;
+  if (fcol.a > 0.003) {
+    vec3 g = fcol.rgb / fcol.a;
+    float l = dot(g, vec3(0.3, 0.5, 0.2));
+    int id = int(clamp(floor(fh.g / max(fh.a, 1e-3) * 10.0 + 0.5), 1.0, 9.0));
+    vec3 fcl = PAL[base + id];
+    // Ben-Day dots in the shadows
+    vec2 q = mat2(0.7071, -0.7071, 0.7071, 0.7071) * (fc / u_dpr);
+    float d = length(fract(q / 5.0) - 0.5);
+    float shd = id == 4 ? 1.0 - smoothstep(0.12, 0.36, l) : 1.0 - smoothstep(0.22, 0.6, l);
+    float r = 0.6 * sqrt(shd);
+    float dots = (1.0 - smoothstep(r - 0.08, r + 0.08, d)) * step(0.5, float(id != 7 && id != 9));
+    vec3 fl = mix(fcl, fcl * 0.4 + PAL[base + 7] * 0.15, dots);
+    if (id == 7) fl = PAL[base + 7];
+    c = mix(back, fl, smoothstep(0.12, 0.6, fcol.a));
+  }
+  // the key-line screen, printed a little off register (each print slips its own way)
+  vec2 op = fp + (vec2(1.5, -1.2) + 2.2 * vec2(h21(vec2(pn, 3.1)), -h21(vec2(pn, 7.7)))) * u_dpr;
+  vec4 oc = texture(u_fgC, op / u_res);
+  vec4 oh = texture(u_fgH, op / u_res);
+  if (oc.a > 0.01) {
+    float ol = dot(oc.rgb / oc.a, vec3(0.3, 0.5, 0.2));
+    float oid = oh.g / max(oh.a, 1e-3) * 10.0;
+    float ink = (1.0 - smoothstep(0.05, 0.12, ol)) * smoothstep(0.3, 0.8, oc.a);
+    ink = max(ink, step(6.5, oid) * step(oid, 7.5) * oc.a);
+    c = mix(c, PAL[base + 7], ink * 0.88);
+  }
+  if (u_grid > 1.5) {
+    vec2 cell = u_res / u_grid;
+    vec2 m = mod(fc, cell);
+    float e = min(min(m.x, cell.x - m.x), min(m.y, cell.y - m.y));
+    c = mix(u_ground, c, smoothstep(1.0 * u_dpr, 2.5 * u_dpr, e));
+  }
+  return c;
+}
+void main(){
+  vec2 fc = gl_FragCoord.xy;
+  vec2 uv = fc / u_res;
+  vec2 css = fc / u_dpr;
+  float pn;
+  vec2 fp = fgPos(fc, pn);
+  vec4 bc = texture(u_bgC, uv), bh = texture(u_bgH, uv);
+  float wm = fgMask(fc);
+  vec4 fcol0 = texture(u_fgC, fp / u_res);
+  vec4 fcol = fcol0 * wm, fh = texture(u_fgH, fp / u_res) * wm;
+  vec3 col = u_pop > 0.5 ? popShade(fc, bc, fcol, fh, pn, fp) : sceneShade(fc, uv, bc, bh, fcol);
+  if (u_waterY > 0.0) {
+    float foam = fcol0.a * (1.0 - smoothstep(0.0, 2.5 * u_dpr, abs(fc.y - waterLine(fc.x))));
+    col = mix(col, vec3(0.62, 0.76, 0.84), foam * 0.6);
+  }
+  float fin = inFrame(fc);
+  col *= fin;
+  float gloss = mix(bh.a > 0.002 ? bh.b / bh.a : 0.0, fh.a > 0.002 ? fh.b / fh.a : 0.0, fcol.a) * fin;
+  float galA = 0.0;
+  if (u_gal > 0.5) {
+    vec4 gc = texture(u_galC, uv), gh = texture(u_galH, uv);
+    vec3 gli = u_galAmb + u_galWarm * pool(fc, u_galPool);
+    col = col * (1.0 - gc.a) + gc.rgb * gli;
+    galA = gc.a;
+    gloss = mix(gloss, gh.a > 0.002 ? gh.b / gh.a : 0.0, gc.a);
+  }
+  // impasto relief from the paint height field
+  float s = max(u_dpr, 1.0);
+  float hl = hAt(fc - vec2(s, 0.0)), hr = hAt(fc + vec2(s, 0.0));
+  float hd = hAt(fc - vec2(0.0, s)), hu = hAt(fc + vec2(0.0, s));
+  float hc = hAt(fc);
+  float wv = 1.0 - smoothstep(0.0, 0.25, hc);
+  vec2 weave = vec2(cos(css.x * 1.7) * sin(css.y * 1.7), sin(css.x * 1.7) * cos(css.y * 1.7)) * 0.12 * wv;
+  vec3 n = normalize(vec3((hl - hr) * u_relief + weave.x, (hd - hu) * u_relief + weave.y, 1.0));
+  vec3 L = normalize(vec3(-0.45, 0.55, 0.7));
+  float diff = dot(n, L) - L.z;
+  vec3 hv = normalize(L + vec3(0.0, 0.0, 1.0));
+  float spec = pow(max(dot(n, hv), 0.0), 30.0);
+  float lum = dot(col, vec3(0.3, 0.5, 0.2));
+  col *= 1.0 + diff * 0.85;
+  col += spec * (0.03 + 0.2 * gloss) * vec3(1.0, 0.93, 0.82) * (0.35 + 0.65 * smoothstep(0.02, 0.4, lum));
+  // canvas tooth under everything
+  col *= 0.955 + 0.09 * h21(floor(css * 0.5));
+  // grade: cool the darks, warm the lights
+  col = mix(col, col * vec3(0.9, 0.92, 1.12), (1.0 - smoothstep(0.0, 0.35, lum)) * (1.0 - u_pop));
+  col = mix(col, u_flash.rgb, u_flash.a);
+  col *= 1.0 - u_fade;
+  vec2 q = uv - 0.5;
+  col *= 1.0 - u_vig * dot(q * vec2(0.9, 1.15), q * vec2(0.9, 1.15));
+  col += (h21(floor(css) + u_grain) - 0.5) * 0.03;
+  o = vec4(clamp(col, 0.0, 1.0), 1.0);
+}`;
+
+function glShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    console.error(log);
+    throw new Error('shader: ' + log);
+  }
+  return s;
+}
+function glProgram(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, glShader(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, glShader(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('link: ' + gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const info = gl.getActiveUniform(p, i); u[info.name] = gl.getUniformLocation(p, info.name); }
+  return { p, u };
+}
+const PROG_STROKE = glProgram(STROKE_VS, STROKE_FS);
+const PROG_COMP = glProgram(COMP_VS, COMP_FS);
+
+function glTex(w, h, internal, format, type) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+  return t;
+}
+let HEIGHT_FLOAT = HAS_CBF;
+function glTarget(w, h, withHeight) {
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  const color = glTex(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color, 0);
+  let height = null;
+  if (withHeight) {
+    height = HEIGHT_FLOAT ? glTex(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT) : glTex(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, height, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE && HEIGHT_FLOAT) {
+      gl.deleteTexture(height);
+      HEIGHT_FLOAT = false;
+      height = glTex(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, height, 0);
+    }
+  } else {
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fb, color, height, w, h, withHeight };
+}
+function glFreeTarget(T) {
+  if (!T) return;
+  gl.deleteFramebuffer(T.fb); gl.deleteTexture(T.color); if (T.height) gl.deleteTexture(T.height);
+}
+function glClearTarget(T) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.fb);
+  gl.viewport(0, 0, T.w, T.h);
+  gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
+  if (T.withHeight) gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
+}
+
+// ---- vertex layout: 15 x 4 bytes = 60 bytes per vertex
+// pos(3f) uv(2f) p(4f: L, W, seed, thickness) rev(3f: in-delay, out-delay, unit->css px) col(4ub) col2(4ub) ex(4ub)
+const VSTRIDE = 15;
+function glMakeStrokeVAO() {
+  const vao = gl.createVertexArray(), vbo = gl.createBuffer(), ibo = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  [[0, 3, gl.FLOAT, false, 0], [1, 2, gl.FLOAT, false, 12], [2, 4, gl.FLOAT, false, 20], [3, 3, gl.FLOAT, false, 36],
+   [4, 4, gl.UNSIGNED_BYTE, true, 48], [5, 4, gl.UNSIGNED_BYTE, true, 52], [6, 4, gl.UNSIGNED_BYTE, true, 56]]
+    .forEach(([loc, n, type, normd, off]) => { gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, n, type, normd, VSTRIDE * 4, off); });
+  gl.bindVertexArray(null);
+  return { vao, vbo, ibo };
+}
+const emptyVAO = gl.createVertexArray();
+
+let CW = 0, CH = 0, DPR = 1;
+let T_BG = null, T_FG = null, T_SH = null, T_GAL = null;
+function glResize() {
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cw = Math.max(1, window.innerWidth || 1280), ch = Math.max(1, window.innerHeight || 800);
+  let w = Math.round(cw * dpr), h = Math.round(ch * dpr);
+  const maxPx = 4.3e6;
+  if (w * h > maxPx) { const k = Math.sqrt(maxPx / (w * h)); w = Math.round(w * k); h = Math.round(h * k); dpr *= k; }
+  if (w === CW && h === CH) return false;
+  CW = w; CH = h; DPR = dpr;
+  cv.width = w; cv.height = h;
+  glFreeTarget(T_BG); glFreeTarget(T_FG); glFreeTarget(T_SH); glFreeTarget(T_GAL);
+  T_BG = glTarget(w, h, true);
+  T_FG = glTarget(w, h, true);
+  T_SH = glTarget(Math.ceil(w / 2), Math.ceil(h / 2), false);
+  T_GAL = glTarget(w, h, true);
+  return true;
+}
+
+// opts: {mask, world, vp, boil, jit, noClear, tIn, tOut}
+function glDrawStrokes(buf, T, opts) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.fb);
+  gl.viewport(0, 0, T.w, T.h);
+  gl.disable(gl.BLEND);
+  if (!opts.noClear) {
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
+    if (T.withHeight) gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
+  }
+  if (buf.ni === 0) return;
+  const P = PROG_STROKE, u = P.u;
+  gl.useProgram(P.p);
+  gl.uniform2f(u.u_res, CW, CH);
+  gl.uniform1f(u.u_mask, opts.mask ? 1 : 0);
+  gl.uniform1f(u.u_world, opts.world ? 1 : 0);
+  gl.uniform1f(u.u_boil, opts.boil || 0);
+  gl.uniform1f(u.u_jit, opts.jit || 0);
+  gl.uniform1f(u.u_tIn, opts.tIn !== undefined ? opts.tIn : 1e4);
+  gl.uniform1f(u.u_tOut, opts.tOut !== undefined ? opts.tOut : -1e4);
+  if (opts.vp) gl.uniformMatrix4fv(u.u_vp, false, opts.vp);
+  gl.enable(gl.BLEND);
+  if (opts.mask) { gl.blendEquation(gl.MAX); }
+  else { gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
+  gl.bindVertexArray(buf.vao);
+  if (buf.dirty) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(buf.ab, 0, buf.nv * VSTRIDE * 4), buf.static ? gl.STATIC_DRAW : gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, buf.idx.subarray(0, buf.ni), buf.static ? gl.STATIC_DRAW : gl.DYNAMIC_DRAW);
+    buf.dirty = false;
+  }
+  gl.drawElements(gl.TRIANGLES, buf.ni, gl.UNSIGNED_INT, 0);
+  gl.bindVertexArray(null);
+  gl.disable(gl.BLEND);
+  gl.blendEquation(gl.FUNC_ADD);
+}
+
+function glComposite(U) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, CW, CH);
+  gl.useProgram(PROG_COMP.p);
+  const u = PROG_COMP.u;
+  const texs = [[T_BG.color, 'u_bgC'], [T_BG.height, 'u_bgH'], [T_FG.color, 'u_fgC'], [T_FG.height, 'u_fgH'], [T_SH.color, 'u_sh'],
+                [T_GAL.color, 'u_galC'], [T_GAL.height, 'u_galH']];
+  texs.forEach(([tex, name], i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(u[name], i); });
+  gl.uniform2f(u.u_res, CW, CH);
+  gl.uniform1f(u.u_dpr, DPR);
+  const v3 = (name, val) => { if (u[name]) gl.uniform3fv(u[name], val); };
+  const v4 = (name, val) => { if (u[name]) gl.uniform4fv(u[name], val); };
+  const f1 = (name, val) => { if (u[name]) gl.uniform1f(u[name], val); };
+  v3('u_amb', U.amb); v3('u_wCol', U.wCol); v3('u_cCol', U.cCol); v3('u_ground', U.ground);
+  v4('u_wPool', U.wPool); v4('u_wPool2', U.wPool2); v4('u_cPool', U.cPool); v4('u_cPool2', U.cPool2);
+  f1('u_grain', U.grain); f1('u_relief', U.relief); f1('u_floorY', U.floorY); f1('u_time', U.time);
+  f1('u_refl', U.refl); f1('u_waterY', U.waterY);
+  f1('u_pop', U.pop); f1('u_grid', U.grid); f1('u_popSeed', U.popSeed);
+  f1('u_gal', U.gal); v4('u_frame', U.frame); v3('u_galAmb', U.galAmb); v3('u_galWarm', U.galWarm); v4('u_galPool', U.galPool);
+  v4('u_flash', U.flash); f1('u_fade', U.fade); f1('u_vig', U.vig);
+  gl.bindVertexArray(emptyVAO);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindVertexArray(null);
+}
+
+// ---- 20-strokes.js
+// ============================================================
+// Brush strokes -> ribbon geometry
+//  * screen strokes: built every frame in device pixels (the dancer, shadows, moving scenery)
+//  * world strokes: built once on the wall / floor planes and projected on the GPU
+// ============================================================
+class StrokeBuf {
+  constructor(isStatic) {
+    this.vcap = 1 << 14; this.icap = 1 << 15;
+    this.ab = new ArrayBuffer(this.vcap * VSTRIDE * 4);
+    this.f = new Float32Array(this.ab); this.u = new Uint32Array(this.ab);
+    this.idx = new Uint32Array(this.icap);
+    this.nv = 0; this.ni = 0; this.count = 0;
+    this.static = !!isStatic; this.dirty = true;
+    Object.assign(this, glMakeStrokeVAO());
+  }
+  reset() { this.nv = 0; this.ni = 0; this.count = 0; this.dirty = true; }
+  ensure(nv, ni) {
+    if (this.nv + nv > this.vcap) {
+      const oldU = this.u;
+      this.vcap = Math.max(this.vcap * 2, this.nv + nv + 1024);
+      this.ab = new ArrayBuffer(this.vcap * VSTRIDE * 4);
+      this.f = new Float32Array(this.ab); this.u = new Uint32Array(this.ab);
+      this.u.set(oldU.subarray(0, this.nv * VSTRIDE));
+    }
+    if (this.ni + ni > this.icap) {
+      const old = this.idx;
+      this.icap = Math.max(this.icap * 2, this.ni + ni + 2048);
+      this.idx = new Uint32Array(this.icap);
+      this.idx.set(old.subarray(0, this.ni));
+    }
+  }
+}
+
+// Global render state shared by all painting code
+const G = {
+  t: 0, b: 0, buf: null, mode: 'paint', layer: 'fg', proj: null,
+  maskCol: [1, 0, 0], boil: 0,
+  wDir: V(0, 0, 1), cDir: V(0, 0, 1), wI: 1, cI: 1, tint: null,
+  cam: null, jit: 0.9,
+  rev: null,
+  mid: 0,        // material id of the part being painted (read by the pop-art prints)
+  pop: false     // pop-art pass: paint light values only, the print inks come later
+};
+const UNIT_WORLD = 3.0;   // css px per cm used for brush texture scale on world strokes
+
+function pack4(r, g, b, a) {
+  return ((clamp(r, 0, 1) * 255 + 0.5) | 0) | (((clamp(g, 0, 1) * 255 + 0.5) | 0) << 8) |
+         (((clamp(b, 0, 1) * 255 + 0.5) | 0) << 16) | (((clamp(a, 0, 1) * 255 + 0.5) | 0) << 24);
+}
+
+const EXT = 1.15;
+let SP = { x: new Float32Array(4096), y: new Float32Array(4096), z: new Float32Array(4096), w: new Float32Array(4096),
+           r: new Float32Array(4096), g: new Float32Array(4096), b: new Float32Array(4096),
+           a: new Float32Array(4096), l: new Float32Array(4096) };
+const JX = new Float32Array(512), JY = new Float32Array(512);
+function growSP(n) {
+  if (n < SP.x.length) return;
+  const m = n * 2;
+  for (const k in SP) { const o = SP[k]; SP[k] = new Float32Array(m); SP[k].set(o); }
+}
+function strokeDefaults(o) {
+  return {
+    w0: o.w0 !== undefined ? o.w0 : 0.62, tS: o.tS !== undefined ? o.tS : 0.14,
+    tE: o.tE !== undefined ? o.tE : 0.34, tip: o.tip !== undefined ? o.tip : 0.28,
+    dry: o.dry !== undefined ? o.dry : 0.35, h: o.h !== undefined ? o.h : 0.35,
+    kind: o.kind || 0, recv: o.recv || 0, gloss: o.gloss !== undefined ? o.gloss : 0.25, sq: o.sq || 0
+  };
+}
+
+// Write m sampled points (SP arrays, x/y[/z]) as a ribbon.
+function emitRibbon(B, m, L, Wmax, seed, rev, unit, o, c2, world, planeN) {
+  const d = strokeDefaults(o);
+  const pc2 = pack4(c2[0], c2[1], c2[2], d.dry);
+  const pex = pack4(d.recv, d.gloss, d.kind / 255, d.sq);
+  const alphaMul = o.a !== undefined ? o.a : 1;
+  B.ensure(m * 2, (m - 1) * 6);
+  const F = B.f, U = B.u;
+  let vi = B.nv;
+  const base = vi;
+  let pnx = 0, pny = 1, pnz = 0;
+  for (let i = 0; i < m; i++) {
+    const i0 = i === 0 ? 0 : i - 1, i1 = i === m - 1 ? m - 1 : i + 1;
+    let tx = SP.x[i1] - SP.x[i0], ty = SP.y[i1] - SP.y[i0], tz = world ? SP.z[i1] - SP.z[i0] : 0;
+    let nx, ny, nz;
+    if (world) { // side = tangent x plane normal
+      nx = ty * planeN.z - tz * planeN.y; ny = tz * planeN.x - tx * planeN.z; nz = tx * planeN.y - ty * planeN.x;
+    } else { nx = -ty; ny = tx; nz = 0; }
+    const nl = Math.hypot(nx, ny, nz);
+    if (nl < 1e-6) { nx = pnx; ny = pny; nz = pnz; } else { nx /= nl; ny /= nl; nz /= nl; }
+    pnx = nx; pny = ny; pnz = nz;
+    const s = SP.l[i] / L;
+    const prof = (d.w0 + (1 - d.w0) * smoothstep(0, d.tS, s)) * (1 - (1 - d.tip) * smoothstep(1 - d.tE, 1, s));
+    const hw = Math.max(world ? 0.2 : 0.7, SP.w[i] * prof) * 0.5 * EXT;
+    const pc = pack4(SP.r[i], SP.g[i], SP.b[i], SP.a[i] * alphaMul);
+    for (let side = -1; side <= 1; side += 2) {
+      const q = vi * VSTRIDE;
+      F[q] = SP.x[i] + nx * hw * side; F[q + 1] = SP.y[i] + ny * hw * side; F[q + 2] = world ? SP.z[i] + nz * hw * side : 0;
+      F[q + 3] = SP.l[i]; F[q + 4] = side * EXT;
+      F[q + 5] = L; F[q + 6] = Wmax; F[q + 7] = seed; F[q + 8] = d.h;
+      F[q + 9] = rev[0]; F[q + 10] = rev[1]; F[q + 11] = unit;
+      U[q + 12] = pc; U[q + 13] = pc2; U[q + 14] = pex;
+      vi++;
+    }
+  }
+  const I = B.idx;
+  let ii = B.ni;
+  for (let i = 0; i < m - 1; i++) {
+    const a = base + i * 2;
+    I[ii++] = a; I[ii++] = a + 1; I[ii++] = a + 2;
+    I[ii++] = a + 1; I[ii++] = a + 3; I[ii++] = a + 2;
+  }
+  B.nv = vi; B.ni = ii; B.dirty = true;
+}
+
+function catmull(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
+// ctrl: [{x, y, w, c:[r,g,b], a?}] in device pixels.
+function strokeScreen(ctrl, o) {
+  const n = ctrl.length;
+  if (n === 0) return;
+  const B = G.buf;
+  const idx = B.count++;
+  if (n === 1) {
+    const p = ctrl[0];
+    const ang = o.ang !== undefined ? o.ang : hash(idx * 3.7) * Math.PI;
+    const len = (o.len !== undefined ? o.len : p.w * 0.7) * 0.5;
+    const dx = Math.cos(ang) * len, dy = Math.sin(ang) * len;
+    ctrl = [{ x: p.x - dx, y: p.y - dy, w: p.w, c: p.c, a: p.a }, { x: p.x + dx, y: p.y + dy, w: p.w, c: p.c, a: p.a }];
+  }
+  strokeScreenN(ctrl, o, idx);
+}
+
+function strokeScreenN(ctrl, o, idx) {
+  const n = ctrl.length;
+  let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9, wmax = 0;
+  for (let i = 0; i < n; i++) {
+    const p = ctrl[i];
+    if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
+    if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
+    if (p.w > wmax) wmax = p.w;
+  }
+  const pad = wmax + 4;
+  if (maxx < -pad || minx > CW + pad || maxy < -pad || miny > CH + pad) return;
+  if (!(maxx - minx < 1e5 && maxy - miny < 1e5)) return;   // degenerate projection
+  const rev = o.rev || (G.rev ? G.rev(idx, (minx + maxx) * 0.5, (miny + maxy) * 0.5) : [NO_IN, NO_OUT]);
+
+  const jit = (o.jit !== undefined ? o.jit : G.jit) * DPR;
+  const seedBase = o.seed !== undefined ? o.seed : idx * 1.618;
+  const boil = o.still ? 0 : G.boil;
+  for (let i = 0; i < n; i++) {
+    const k = seedBase * 7.31 + i * 1.97 + boil * 3.17;
+    JX[i] = jit ? (hash(k) - 0.5) * 2 * jit : 0;
+    JY[i] = jit ? (hash(k + 11.3) - 0.5) * 2 * jit : 0;
+  }
+  let m = 0;
+  const step = 5 * DPR;
+  growSP(n * 44 + 8);
+  for (let i = 0; i < n - 1; i++) {
+    const i0 = i > 0 ? i - 1 : 0, i3 = i + 2 < n ? i + 2 : n - 1;
+    const p0 = ctrl[i0], p1 = ctrl[i], p2 = ctrl[i + 1], p3 = ctrl[i3];
+    const x0 = p0.x + JX[i0], y0 = p0.y + JY[i0], x1 = p1.x + JX[i], y1 = p1.y + JY[i];
+    const x2 = p2.x + JX[i + 1], y2 = p2.y + JY[i + 1], x3 = p3.x + JX[i3], y3 = p3.y + JY[i3];
+    const segs = Math.max(1, Math.min(40, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / step)));
+    const c1 = p1.c, c2 = p2.c, a1 = p1.a !== undefined ? p1.a : 1, a2 = p2.a !== undefined ? p2.a : 1;
+    for (let s = 0; s < segs; s++) {
+      const t = s / segs;
+      SP.x[m] = catmull(x0, x1, x2, x3, t);
+      SP.y[m] = catmull(y0, y1, y2, y3, t);
+      SP.w[m] = p1.w + (p2.w - p1.w) * t;
+      SP.r[m] = c1[0] + (c2[0] - c1[0]) * t; SP.g[m] = c1[1] + (c2[1] - c1[1]) * t; SP.b[m] = c1[2] + (c2[2] - c1[2]) * t;
+      SP.a[m] = a1 + (a2 - a1) * t;
+      m++;
+    }
+  }
+  {
+    const p = ctrl[n - 1];
+    SP.x[m] = p.x + JX[n - 1]; SP.y[m] = p.y + JY[n - 1]; SP.w[m] = p.w;
+    SP.r[m] = p.c[0]; SP.g[m] = p.c[1]; SP.b[m] = p.c[2]; SP.a[m] = p.a !== undefined ? p.a : 1;
+    m++;
+  }
+  SP.l[0] = 0;
+  for (let i = 1; i < m; i++) SP.l[i] = SP.l[i - 1] + Math.hypot(SP.x[i] - SP.x[i - 1], SP.y[i] - SP.y[i - 1]);
+  let L = SP.l[m - 1];
+  if (L < 0.5) { SP.x[m - 1] += 0.5; L = 0.5; SP.l[m - 1] = 0.5; }
+  let c2 = o.c2;
+  if (!c2) { const c = ctrl[0].c; c2 = [c[0] * 1.1 + 0.03, c[1] * 1.03 + 0.01, c[2] * 0.9]; }
+  const seed = (seedBase + boil * 0.3719) % 97.0;
+  if (!o.exact && G.mode !== 'mask') {
+    const kv = 1 + (hash(seedBase * 5.77) - 0.5) * 0.12, kh = (hash(seedBase * 9.13) - 0.5) * 0.05;
+    for (let i = 0; i < m; i++) { SP.r[i] = SP.r[i] * kv + kh; SP.g[i] *= kv; SP.b[i] = SP.b[i] * kv - kh; }
+  }
+  emitRibbon(G.buf, m, L, wmax, seed, rev, 1 / DPR, o, c2, false, null);
+}
+
+// World-space stroke on a plane (planeN = plane normal). pts: V[], widths in cm.
+function strokeWorld(pts, w, col, o, planeN, rev) {
+  const B = G.buf;
+  const idx = B.count++;
+  const n = pts.length;
+  let m = 0;
+  growSP(n * 44 + 8);
+  const cols = Array.isArray(col[0]) ? col : null;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[i > 0 ? i - 1 : 0], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2 < n ? i + 2 : n - 1];
+    const segs = Math.max(1, Math.min(24, Math.ceil(vlen(vsub(p2, p1)) / 6)));
+    const w1 = typeof w === 'number' ? w : w[i], w2 = typeof w === 'number' ? w : w[i + 1];
+    const c1 = cols ? cols[i] : col, c2 = cols ? cols[i + 1] : col;
+    for (let s = 0; s < segs; s++) {
+      const t = s / segs;
+      SP.x[m] = catmull(p0.x, p1.x, p2.x, p3.x, t);
+      SP.y[m] = catmull(p0.y, p1.y, p2.y, p3.y, t);
+      SP.z[m] = catmull(p0.z, p1.z, p2.z, p3.z, t);
+      SP.w[m] = w1 + (w2 - w1) * t;
+      SP.r[m] = c1[0] + (c2[0] - c1[0]) * t; SP.g[m] = c1[1] + (c2[1] - c1[1]) * t; SP.b[m] = c1[2] + (c2[2] - c1[2]) * t;
+      SP.a[m] = 1;
+      m++;
+    }
+  }
+  const pl = pts[n - 1], cl = cols ? cols[n - 1] : col;
+  SP.x[m] = pl.x; SP.y[m] = pl.y; SP.z[m] = pl.z; SP.w[m] = typeof w === 'number' ? w : w[n - 1];
+  SP.r[m] = cl[0]; SP.g[m] = cl[1]; SP.b[m] = cl[2]; SP.a[m] = 1;
+  m++;
+  SP.l[0] = 0;
+  for (let i = 1; i < m; i++) SP.l[i] = SP.l[i - 1] + Math.hypot(SP.x[i] - SP.x[i - 1], SP.y[i] - SP.y[i - 1], SP.z[i] - SP.z[i - 1]);
+  let L = Math.max(SP.l[m - 1], 0.3);
+  let wmax = 0;
+  for (let i = 0; i < m; i++) if (SP.w[i] > wmax) wmax = SP.w[i];
+  let c2 = o.c2;
+  if (!c2) { const c = cols ? cols[0] : col; c2 = [c[0] * 1.1 + 0.03, c[1] * 1.03 + 0.01, c[2] * 0.9]; }
+  const seed = (idx * 1.618) % 97.0;
+  emitRibbon(B, m, L, wmax, seed, rev, UNIT_WORLD, o, c2, true, planeN);
+}
+
+// ---------- 3D stroke for the dancer and moving scenery: points in world space, widths in cm,
+// projected by G.proj. col: [r,g,b] or one colour per point.  w: number or one per point.
+function fgOpts(o) {
+  if (G.layer === 'fg' && o.recv === undefined) { o = Object.assign({}, o); o.recv = G.mid / 10; }
+  return o;
+}
+function st(pts, w, col, o) {
+  o = o || {};
+  const n = pts.length;
+  if (G.mode === 'mask') {
+    if (o.noShadow) { G.buf.count++; return; }
+    const ctrl = [];
+    for (let i = 0; i < n; i++) {
+      const wi = (typeof w === 'number' ? w : w[i]) * 1.05;
+      const q = G.proj(pts[i]);
+      ctrl.push({ x: q.x, y: q.y, w: Math.max(1, wi * q.s), c: G.maskCol });
+      if (i < n - 1) {
+        const w2 = (typeof w === 'number' ? w : w[i + 1]) * 1.05;
+        const qm = G.proj(vlerp(pts[i], pts[i + 1], 0.5));
+        ctrl.push({ x: qm.x, y: qm.y, w: Math.max(1, (wi + w2) * 0.5 * qm.s), c: G.maskCol });
+      }
+    }
+    return strokeScreen(ctrl, { dry: 0.12, w0: 1, tip: 0.85, tS: 0.05, tE: 0.12, kind: 0, jit: 1.2, seed: o.seed, sq: o.sq || 0 });
+  }
+  const ctrl = new Array(n);
+  const perPointCol = Array.isArray(col[0]);
+  for (let i = 0; i < n; i++) {
+    const q = G.proj(pts[i]);
+    ctrl[i] = { x: q.x, y: q.y, w: Math.max(0.8, (typeof w === 'number' ? w : w[i]) * q.s), c: perPointCol ? col[i] : col };
+  }
+  return strokeScreen(ctrl, fgOpts(o));
+}
+// a dab: one point, width w (cm), length len (cm), screen angle ang (radians) or auto
+function dab(p, w, len, col, o) {
+  o = o || {};
+  if (G.mode === 'mask') {
+    if (o.noShadow) { G.buf.count++; return; }
+    const q = G.proj(p);
+    return strokeScreen([{ x: q.x, y: q.y, w: Math.max(1, w * q.s * 1.05), c: G.maskCol }], { len: len * q.s, ang: o.ang, dry: 0.15, w0: 0.9, tip: 0.7, kind: 0, jit: 1 });
+  }
+  const q = G.proj(p);
+  const oo = fgOpts(Object.assign({}, o, { len: len * q.s }));
+  return strokeScreen([{ x: q.x, y: q.y, w: Math.max(0.8, w * q.s), c: col }], oo);
+}
+
+// ============================================================
+// Lettering: the browser rasterises the words, and each row of ink becomes one
+// sign-painter's stroke. Runs are cached per string/font/size.
+// ============================================================
+const TEXT_CACHE = new Map();
+function textRuns(str, font, size, rows) {
+  const key = [str, font, size, rows].join('|');
+  if (TEXT_CACHE.has(key)) return TEXT_CACHE.get(key);
+  const c = document.createElement('canvas');
+  const x = c.getContext('2d');
+  const f = font.replace('%', size + 'px');
+  x.font = f;
+  const w = Math.ceil(x.measureText(str).width + size * 0.5), h = Math.ceil(size * 1.45);
+  c.width = w; c.height = h;
+  x.font = f; x.fillStyle = '#fff'; x.textBaseline = 'alphabetic';
+  x.fillText(str, size * 0.25, size * 1.08);
+  const d = x.getImageData(0, 0, w, h).data;
+  const step = size / rows;
+  const runs = [];
+  let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+  for (let y = step * 0.5; y < h; y += step) {
+    const yy = Math.floor(y);
+    let x0 = -1;
+    for (let xx = 0; xx <= w; xx++) {
+      const on = xx < w && d[(yy * w + xx) * 4 + 3] > 100;
+      if (on && x0 < 0) x0 = xx;
+      if (!on && x0 >= 0) {
+        runs.push([x0, xx, yy]);
+        minx = Math.min(minx, x0); maxx = Math.max(maxx, xx); miny = Math.min(miny, yy); maxy = Math.max(maxy, yy);
+        x0 = -1;
+      }
+    }
+  }
+  const out = { runs, step, x0: minx, x1: maxx, y0: miny, y1: maxy };
+  TEXT_CACHE.set(key, out);
+  return out;
+}
+// Paint a line of text centred on (cx, cy) in device px. sizePx: font size in device px.
+function paintText(str, font, cx, cy, sizePx, col, o) {
+  o = o || {};
+  const base = 120;
+  const R = textRuns(str, font, base, o.rows || 22);
+  const k = sizePx / base;
+  const ox = cx - (R.x0 + R.x1) * 0.5 * k, oy = cy - (R.y0 + R.y1) * 0.5 * k;
+  const w = R.step * k * (o.wk || 1.55);
+  const cols = Array.isArray(col[0]) ? col : null;
+  for (let i = 0; i < R.runs.length; i++) {
+    const r = R.runs[i];
+    const c = cols ? cols[i % cols.length] : col;
+    const x0 = ox + r[0] * k, x1 = ox + r[1] * k, y = oy + r[2] * k;
+    const len = x1 - x0;
+    const tilt = (hash(i * 3.3 + 1) - 0.5) * w * 0.3;
+    const oo = o.revFn ? Object.assign({}, o, { rev: o.revFn((x0 + x1) * 0.5) }) : o;
+    if (len < w * 0.8) {
+      strokeScreen([{ x: (x0 + x1) * 0.5, y, w: w * 0.95, c }], Object.assign({ len: Math.max(len, w * 0.4), ang: 0 }, oo));
+    } else {
+      strokeScreen([{ x: x0 + w * 0.25, y: y - tilt, w, c }, { x: x1 - w * 0.25, y: y + tilt, w, c }], oo);
+    }
+  }
+  return { w: (R.x1 - R.x0) * k, h: (R.y1 - R.y0) * k };
+}
+
+// ---- 30-rig.js
+// ============================================================
+// Skeleton: pose parameters -> 3D joints (units: cm, floor at y = 0)
+// "M" = the microphone arm (his right, screen left), "F" = free arm (his left, screen right)
+// ============================================================
+const RIG = {
+  pelvisY: 98, waistLen: 14, chestLen: 24, neckLen: 14,
+  shoulderX: 19, upperArm: 29, foreArm: 26.5,
+  hipX: 9.5, hipY: -4, thigh: 44, shin: 42
+};
+
+function basePose() {
+  return {
+    px: 0, py: -2.5, pz: 0, pyaw: 0, ppitch: 0, proll: 0,
+    ry: 0,                                   // lifts the whole body (feet included): river, jumps
+    cyaw: 0, cpitch: 0.03, croll: 0,
+    hyaw: 0, hpitch: 0, hroll: 0,
+    shM: 0, shF: 0,
+    mX: -20, mY: -30, mZ: 14, mPole: 0,
+    fX: 20, fY: -30, fZ: 14, fPole: 0,
+    fOpen: 0, fPoint: 0, micAim: 0, mOpen: 0,
+    lfx: -15, lfz: 2, lfy: 0, lheel: 0, lfyaw: -0.22,
+    rfx: 15, rfz: 2, rfy: 0, rheel: 0, rfyaw: 0.22,
+    lkx: -0.3, rkx: 0.3, squash: 0, twirl: 0, twA: 0,
+    mouth: 0, smile: 0.5, brow: 0, blink: 0, wink: 0, mO: 0,
+    flip: 0, hat: 0, hatLift: 0              // shadow-only tricks
+  };
+}
+function lerpPose(a, b, t) {
+  const r = {};
+  for (const k in a) r[k] = a[k] + (b[k] - a[k]) * t;
+  return r;
+}
+
+function ik2(A, T, l1, l2, pole) {
+  const d = vsub(T, A);
+  let dist = vlen(d);
+  const dir = dist > 1e-6 ? vmul(d, 1 / dist) : V(0, -1, 0);
+  dist = clamp(dist, Math.abs(l1 - l2) + 0.5, l1 + l2 - 0.05);
+  const cosA = clamp((l1 * l1 + dist * dist - l2 * l2) / (2 * l1 * dist), -1, 1);
+  const sinA = Math.sqrt(1 - cosA * cosA);
+  let pp = vsub(pole, vmul(dir, vdot(pole, dir)));
+  let pl = vlen(pp);
+  if (pl < 1e-5) { pp = vsub(V(0, 0, 1), vmul(dir, dir.z)); pl = vlen(pp) || 1; }
+  pp = vmul(pp, 1 / pl);
+  const E = vadd(A, vadd(vmul(dir, cosA * l1), vmul(pp, sinA * l1)));
+  return { E, T: vadd(A, vmul(dir, dist)) };
+}
+
+function footPts(x, z, lift, heel, yaw) {
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  return {
+    ankle: V(x - fx * 8, 8.5 + lift + heel * 0.85, z - fz * 8 + heel * 0.2),
+    heel: V(x - fx * 12, 3 + lift + heel, z - fz * 12),
+    ball: V(x + fx * 4, 1.5 + lift, z + fz * 4),
+    toe: V(x + fx * 11, 2.5 + lift, z + fz * 11)
+  };
+}
+
+function solveRig(ps) {
+  const J = {};
+  const pel = V(ps.px, RIG.pelvisY + ps.py + ps.ry, ps.pz);
+  const Rp = rotYXZ(ps.pyaw, ps.ppitch, ps.proll);
+  const Rw = mm(Rp, rotYXZ(ps.cyaw * 0.5, ps.cpitch * 0.5, ps.croll * 0.5));
+  const Rc = mm(Rp, rotYXZ(ps.cyaw, ps.cpitch, ps.croll));
+  J.pelvis = pel; J.Rp = Rp; J.Rw = Rw; J.Rc = Rc;
+  J.waist = xf(pel, Rp, 0, RIG.waistLen, 0);
+  J.chest = xf(J.waist, Rw, 0, RIG.chestLen, 0);
+  J.neck = xf(J.chest, Rc, 0, RIG.neckLen, -1);
+  const Rn = mm(Rc, rotYXZ(ps.hyaw * 0.4, ps.hpitch * 0.4 + 0.04, ps.hroll * 0.4));
+  const Rh = mm(Rc, rotYXZ(ps.hyaw, ps.hpitch, ps.hroll));
+  J.Rh = Rh;
+  J.neckTop = xf(J.neck, Rn, 0, 7, 1.2);
+  J.head = xf(J.neckTop, Rh, 0, 10.5, 0.5);
+  J.shM = xf(J.neck, Rc, -RIG.shoulderX, -3 + ps.shM, -1);
+  J.shF = xf(J.neck, Rc, RIG.shoulderX, -3 + ps.shF, -1);
+  const tM = xf(J.chest, Rc, ps.mX, ps.mY, ps.mZ);
+  const tF = xf(J.chest, Rc, ps.fX, ps.fY, ps.fZ);
+  const poleM = mv(Rc, vnorm(V(-0.85, -0.55, -0.35 + ps.mPole)));
+  const poleF = mv(Rc, vnorm(V(0.85, -0.55, -0.35 + ps.fPole)));
+  let a = ik2(J.shM, tM, RIG.upperArm, RIG.foreArm, poleM); J.elM = a.E; J.wrM = a.T;
+  a = ik2(J.shF, tF, RIG.upperArm, RIG.foreArm, poleF); J.elF = a.E; J.wrF = a.T;
+  J.hipL = xf(pel, Rp, -RIG.hipX, RIG.hipY, 0);
+  J.hipR = xf(pel, Rp, RIG.hipX, RIG.hipY, 0);
+  const fl = footPts(ps.lfx, ps.lfz, ps.lfy + ps.ry, ps.lheel, ps.lfyaw);
+  const fr = footPts(ps.rfx, ps.rfz, ps.rfy + ps.ry, ps.rheel, ps.rfyaw);
+  // knees point where the body points (matters when he spins)
+  const Ry = rotYXZ(ps.pyaw, 0, 0);
+  a = ik2(J.hipL, fl.ankle, RIG.thigh, RIG.shin, mv(Ry, V(ps.lkx, 0, 1))); J.knL = a.E; J.anL = a.T; J.footL = fl;
+  a = ik2(J.hipR, fr.ankle, RIG.thigh, RIG.shin, mv(Ry, V(ps.rkx, 0, 1))); J.knR = a.E; J.anR = a.T; J.footR = fr;
+  // mouth point (for the microphone to aim at) in head space
+  J.mouth = xf(J.head, Rh, 0, -6.4, 10);
+  J.ground = ps.ry;
+  J.pose = ps;
+  return J;
+}
+
+// ---- 40-dance.js
+// ============================================================
+// Choreography for a 30 second club scene: 56 beats at 112 BPM.
+//   0-8    the lead waits in the smoke at the back, hat pulled low; a flick of the brim
+//   8-16   the walk: a long, unhurried stride out into the room and down to the spotlight
+//  16-24   in the light: shoulder pops, a point, a full spin, up on his toes
+//  18-26   four dancers in dark suits march in from both sides and take up a V behind him
+//  24-32   a sideways glide, left and back again, with the line swaying in time
+//  32-40   the hits: arms flung out on the beat, the whole line together; a spin
+//  40-48   the feet: taps and slides (the camera drops to the floor)
+//  48-50   everything stops, hands go to the hat brims
+//  50-56   the lean: the lead tips far past his balance point, holds, snaps up and tips his hat
+// Every pose is a function of the beat, so any frame can be reproduced.
+// ============================================================
+const parity = k => ((k % 2) + 2) % 2;
+
+function sideHit(b, lag, w0, w1, over) {
+  b -= lag || 0;
+  const k = Math.floor(b + 0.5);
+  const d = b - k;
+  const sg = parity(k) === 0 ? 1 : -1;
+  const a0 = w0 === undefined ? 0.32 : w0, a1 = w1 === undefined ? 0.3 : w1;
+  if (d <= -a0) return -sg;
+  if (d >= a1) return sg;
+  return lerp(-sg, sg, easeInOutBack((d + a0) / (a0 + a1), over === undefined ? 1.1 : over));
+}
+const dip = b => Math.pow(0.5 + 0.5 * Math.cos(TAU * b), 2.5);
+
+// the basic two-step: weight shifts on every beat, knees dip on the beat, arms swing across the body
+function twoStep(b, amp, P) {
+  const s = sideHit(b);
+  const sa = sideHit(b, 0.07, 0.3, 0.34, 1.6);
+  const dp = dip(b);
+  P.px = s * 10 * amp;
+  P.py = -3 - dp * 8 * amp;
+  P.proll = s * 0.13 * amp;
+  P.pyaw = s * 0.14 * amp;
+  P.croll = -s * 0.15 * amp;
+  P.cyaw = -sa * 0.26 * amp;
+  P.cpitch = 0.04 + dp * 0.1 * amp;
+  P.hroll = s * 0.1 * amp;
+  P.hpitch = -0.03 + dp * 0.16 * amp;
+  P.hyaw = -sa * 0.12 * amp;
+  const a = -sa;
+  P.mX = -12 + 16 * a * amp; P.mY = -22 + 8 * a * amp - dp * 4; P.mZ = 23 - 3 * Math.abs(a) * amp;
+  P.fX = 12 + 16 * a * amp; P.fY = -22 - 8 * a * amp - dp * 4; P.fZ = 23 - 3 * Math.abs(a) * amp;
+  P.fOpen = smoothstep(-0.25, 0.25, Math.sin(Math.PI * (b + 0.25)));
+  P.mOpen = smoothstep(-0.25, 0.25, Math.sin(Math.PI * (b + 0.75)));
+  P.lfx = -17; P.rfx = 17;
+  P.lheel = Math.max(0, s) * 8 * amp;
+  P.rheel = Math.max(0, -s) * 8 * amp;
+  P.lkx = lerp(-0.3, 0.9, clamp(s * amp, 0, 1));
+  P.rkx = lerp(0.3, -0.9, clamp(-s * amp, 0, 1));
+  P.shM = Math.max(0, -s) * 2 * amp;
+  P.shF = Math.max(0, s) * 2 * amp;
+  P.smile = 0.5;
+  P.mouth = 0.05 + 0.05 * dp;
+  return P;
+}
+
+// shift a pose (built around the origin) to a spot on the floor
+function place(P, x, z) {
+  P.px += x; P.pz += z; P.lfx += x; P.rfx += x; P.lfz += z; P.rfz += z;
+  return P;
+}
+// an arm reaching a target relative to the chest (side: 'M' = screen left, 'F' = screen right)
+function arm(P, side, x, y, z, open, point) {
+  if (side === 'M') { P.mX = x; P.mY = y; P.mZ = z; P.mOpen = open || 0; }
+  else { P.fX = x; P.fY = y; P.fZ = z; P.fOpen = open || 0; P.fPoint = point || 0; }
+}
+
+// a walking stride along the unit vector (dx, dz); A is the half stride (cm), u = beats since the first step
+// (feet track the pelvis, so a straight walk at A cm-per-beat / 2 stays planted without sliding)
+function stride(b, P, dx, dz, A, b0, faceYaw) {
+  const yaw = faceYaw === undefined ? Math.atan2(dx, dz) : faceYaw;
+  const fx = dx, fz = dz, rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  const u = b - b0, c = Math.cos(Math.PI * u), sn = Math.sin(Math.PI * u);
+  const sL = A * c, sR = -A * c;
+  P.pyaw = yaw;
+  P.lfx = -11 * rx + fx * sL; P.lfz = -11 * rz + fz * sL;
+  P.rfx = 11 * rx + fx * sR; P.rfz = 11 * rz + fz * sR;
+  P.lfy = 9 * Math.max(0, -sn); P.rfy = 9 * Math.max(0, sn);
+  P.lfyaw = yaw - 0.1; P.rfyaw = yaw + 0.1;
+  P.lheel = 7 * Math.max(0, sn) * (c < 0 ? 1 : 0.3); P.rheel = 7 * Math.max(0, -sn) * (c > 0 ? 1 : 0.3);
+  P.py = -3 - 2.2 * Math.abs(sn);
+  P.proll = 0.06 * sn; P.croll = -0.07 * sn; P.cyaw = -0.16 * c;
+  P.hyaw = -0.5 * yaw; P.hpitch = 0.06; P.hroll = -0.04 * sn;
+  P.mX = -20 - 3 * sn; P.mY = -29; P.mZ = 14 + 11 * c; P.mOpen = 0.3;
+  P.fX = 20 + 3 * sn; P.fY = -29; P.fZ = 14 - 11 * c; P.fOpen = 0.3;
+  P.smile = 0.25; P.mouth = 0.03;
+  return P;
+}
+
+// ---------------------------------------------------------------- moves
+function idle(b, P, amp) { twoStep(b, amp, P); P.smile = 0.2; P.hpitch += 0.12; return P; }
+
+// hand to the brim, tip, and back
+function hatTip(b, P, s, amp) {
+  const lb = b - s;
+  twoStep(b, amp === undefined ? 0.3 : amp, P);
+  const up = easeOutBack(seg(lb, 0, 0.35), 1.8), down = smoothstep(0.95, 1.5, lb);
+  const e = up * (1 - down);
+  arm(P, 'F', lerp(P.fX, 13, e), lerp(P.fY, 43, e), lerp(P.fZ, 17, e), e, 0);
+  P.hatLift = e * 0.8;
+  P.hpitch = lerp(P.hpitch, 0.16, e); P.hroll = lerp(P.hroll, -0.08, e);
+  P.smile = lerp(0.4, 0.9, e); P.brow = 0.4 * e;
+  return P;
+}
+
+// the low, cool stand-up after the lean: hat down again
+function crouchPop(b, P, s) {
+  const lb = b - s;
+  twoStep(b, 0.6, P);
+  const d = bump(lb, 0.1, 0.16);
+  P.py -= 12 * d; P.lkx = lerp(P.lkx, -0.9, d); P.rkx = lerp(P.rkx, 0.9, d);
+  P.shM += 6 * bump(lb, 0.3, 0.12); P.shF -= 4 * bump(lb, 0.3, 0.12);
+  return P;
+}
+
+// a full spin on the balls of the feet, arms out, jacket-shoulders leading
+function spin(b, P, s) {
+  const lb = b - s;
+  twoStep(b, 0.35, P);
+  const u = easeInOutCubic(seg(lb, 0.35, 1.55));
+  let yaw = -0.4 * bump(lb, 0.22, 0.14) + TAU * u;
+  if (u > 0.5) yaw -= TAU;
+  P.pyaw = yaw; P.cyaw = -0.12 * Math.sin(Math.PI * u); P.croll = 0; P.proll = 0;
+  P.px = 0; P.py = -3 - 3 * Math.sin(Math.PI * u);
+  const out = 1 - 0.4 * Math.sin(Math.PI * u);
+  arm(P, 'M', -38 * out, 6, 10, 1); arm(P, 'F', 38 * out, 6, 10, 1);
+  P.mPole = 0; P.fPole = 0;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  P.lfx = -11 * cy + 2 * sy; P.lfz = 11 * sy + 2 * cy;
+  P.rfx = 11 * cy + 2 * sy; P.rfz = -11 * sy + 2 * cy;
+  P.lfyaw = -0.15 + yaw; P.rfyaw = 0.15 + yaw;
+  const toes = Math.sin(Math.PI * u);
+  P.lheel = 11 * toes; P.rheel = 11 * toes;
+  P.lkx = -0.2; P.rkx = 0.2;
+  P.hpitch = 0.05; P.smile = 0.8;
+  return P;
+}
+
+// up on the toes, arms opening, chin lifting
+function toeStand(b, P, s) {
+  const lb = b - s;
+  twoStep(b, 0.3, P);
+  const e = easeOutBack(seg(lb, 0, 0.3), 1.6);
+  P.lheel = lerp(P.lheel, 15, e); P.rheel = lerp(P.rheel, 15, e); P.py = lerp(P.py, 4, e);
+  P.lfx = -12; P.rfx = 12;
+  arm(P, 'M', lerp(P.mX, -30, e), lerp(P.mY, 24, e), lerp(P.mZ, 14, e), e);
+  arm(P, 'F', lerp(P.fX, 30, e), lerp(P.fY, 24, e), lerp(P.fZ, 14, e), e);
+  P.hpitch = lerp(P.hpitch, -0.14, e); P.smile = 0.8;
+  return P;
+}
+
+// a shoulder pop and a point across the room
+function popPoint(b, P, s) {
+  const lb = b - s;
+  twoStep(b, 0.7, P);
+  const e = easeOutBack(seg(lb, 0.0, 0.25), 2.2) * (1 - smoothstep(1.4, 1.9, lb));
+  arm(P, 'F', lerp(P.fX, 50, e), lerp(P.fY, 22, e), lerp(P.fZ, 22, e), 0, e);
+  P.shF += 4 * bump(lb, 0.05, 0.1);
+  P.hyaw = lerp(P.hyaw, 0.3, e); P.smile = 0.7; P.brow = 0.5 * e;
+  return P;
+}
+
+// sideways glide: the pelvis is carried along by the path; the feet shuffle underneath
+function glide(b, P, dir, b0) {
+  twoStep(b, 0.25, P);
+  stride(b, P, dir, 0, 5.5, b0, 0);
+  P.lfy *= 0.35; P.rfy *= 0.35;
+  arm(P, 'M', -26, -4 + 3 * Math.sin(TAU * b), 16, 0.6);
+  arm(P, 'F', 28, 2 + 4 * Math.sin(Math.PI * b), 18, 0.8);
+  P.hroll = 0.07 * Math.sin(Math.PI * b); P.hpitch = 0.08; P.smile = 0.6;
+  return P;
+}
+
+// arms flung out on the beat: side is 'M' (screen left) or 'F' (screen right), s = first beat
+function hits(b, P, s, side) {
+  twoStep(b, 0.55, P);
+  const k = Math.floor(b), u = b - k;
+  const on = parity(k - s) === 0;
+  const e = on ? easeOutBack(seg(u, 0, 0.22), 2.4) * (1 - smoothstep(0.7, 0.98, u)) : 0;
+  const sg = side === 'M' ? -1 : 1;
+  arm(P, side, lerp(P[side.toLowerCase() + 'X'], sg * 50, e), lerp(P[side.toLowerCase() + 'Y'], 24, e), lerp(P[side.toLowerCase() + 'Z'], 22, e), 0, side === 'F' ? e : 0);
+  P.hyaw = lerp(P.hyaw, sg * 0.35, e); P.pyaw += sg * 0.25 * e; P.smile = 0.4;
+  return P;
+}
+
+// the rest-of-the-line move: a finger snap by the shoulder on every beat
+function snapStep(b, P) {
+  twoStep(b, 0.55, P);
+  const dp = dip(b), u = b - Math.floor(b);
+  arm(P, 'F', 30, 9 + 3 * dp, 17, u > 0.72 ? lerp(1, 0.15, seg(u, 0.72, 0.95)) : smoothstep(0, 0.07, u) * 0.85 + 0.15, 0);
+  P.fPole = 0.3; P.shF += 2 * bump(u, 0.02, 0.05);
+  return P;
+}
+
+// both hands to the brim and hold
+function handsToBrim(b, P, s, hold) {
+  const lb = b - s;
+  twoStep(b, 0.1 * (1 - smoothstep(0, 0.4, lb)), P);
+  const e = easeOutBack(seg(lb, 0, 0.3), 1.6);
+  arm(P, 'M', lerp(P.mX, -13, e), lerp(P.mY, 44, e), lerp(P.mZ, 15, e), e);
+  arm(P, 'F', lerp(P.fX, 13, e), lerp(P.fY, 44, e), lerp(P.fZ, 15, e), e);
+  P.hpitch = lerp(P.hpitch, 0.18, e); P.smile = 0.1; P.py = lerp(P.py, -5, e);
+  return P;
+}
+
+// the feet: quick taps and slides on the eighth notes while the upper body stays cool
+function taps(b, P) {
+  twoStep(b, 0.35, P);
+  const e = b * 2, k = Math.floor(e), u = e - k;
+  const left = parity(k) === 0;
+  const tap = Math.pow(Math.max(0, Math.sin(Math.PI * u)), 1.5);
+  P.lfx = -12; P.rfx = 12;
+  if (left) { P.lheel = 16 * tap; P.lfy = 3 * tap; P.lfz = 4 * Math.sin(Math.PI * u); }
+  else { P.rheel = 16 * tap; P.rfy = 3 * tap; P.rfz = 4 * Math.sin(Math.PI * u); }
+  const sl = Math.sin(TAU * b * 0.5);
+  P.lfx += 5 * sl; P.rfx += 5 * sl;
+  arm(P, 'M', -24 + 6 * Math.sin(TAU * b), -8, 18, 0.5);
+  arm(P, 'F', 24 - 6 * Math.sin(TAU * b), -8, 18, 0.5);
+  P.hpitch = 0.12; P.smile = 0.7;
+  return P;
+}
+
+// the lean: anchored feet, the whole body pivots forward far past where balance would allow.
+// L runs 0..1; the body turns three-quarters so the tilt shows in profile
+function lean(b, P, s) {
+  const lb = b - s;
+  const down = easeInOutCubic(seg(lb, 0, 1.3));
+  const up = easeInOutCubic(seg(lb, 3.05, 3.4));
+  const L = down * (1 - up);
+  const yaw = 0.62 * L;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  twoStep(b, 0.15 * (1 - L), P);
+  const reach = 27 * L;
+  P.px = fx * reach; P.pz = fz * reach;
+  P.py = -14 * L;
+  P.pyaw = yaw; P.ppitch = 0.74 * L; P.proll = 0; P.croll = 0; P.cyaw = 0; P.cpitch = 0.12 * L + 0.03;
+  // the feet stay where they were: wide, one slightly behind the other, toes pointing along the tilt
+  const back = 8 + 10 * L;
+  P.lfx = -12 * rx - fx * back; P.lfz = -12 * rz - fz * back;
+  P.rfx = 12 * rx - fx * back * 0.6; P.rfz = 12 * rz - fz * back * 0.6;
+  P.lfyaw = yaw - 0.1; P.rfyaw = yaw + 0.1;
+  P.lheel = 0; P.rheel = 0; P.lfy = 0; P.rfy = 0; P.lkx = -0.15; P.rkx = 0.15;
+  // eyes stay on us, chin up
+  P.hyaw = -0.62 * L; P.hpitch = -0.62 * L; P.hroll = 0.05 * L;
+  // arms hang straight down, one slightly back, fingers spread
+  arm(P, 'M', lerp(P.mX, -22, L), lerp(P.mY, -32, L), lerp(P.mZ, 26, L), 0.8 * L);
+  arm(P, 'F', lerp(P.fX, 24, L), lerp(P.fY, -30, L), lerp(P.fZ, 4, L), 0.8 * L);
+  P.smile = lerp(0.4, 0.9, L);
+  return P;
+}
+
+// ---------------------------------------------------------------- the lead
+// where his pelvis is on the floor at beat b
+function leadXZ(b) {
+  if (b < 8) return [120, -175];
+  if (b < 16) { const u = (b - 8) / 8; return [lerp(120, 0, u), lerp(-175, 30, u)]; }
+  if (b < 24) return [0, 30];
+  if (b < 28) return [lerp(0, -46, (b - 24) / 4), 30];
+  if (b < 32) return [lerp(-46, 0, (b - 28) / 4), 30];
+  if (b < 40) return [0, 30];
+  if (b < 48) return [0, 30 + 26 * smoothstep(40, 41.5, b) * (1 - smoothstep(46.5, 48, b))];
+  return [0, 30];
+}
+const LEAD_SECTIONS = [
+  { b: -1, f: (b, P) => idle(b, P, 0.12) },
+  { b: 5.5, f: (b, P, s) => hatTip(b, P, 6.2, 0.12) },
+  { b: 8, f: (b, P, s) => { const [x0, z0] = [120, -175], d = vnorm(V(-120, 0, 205)); return stride(b, P, d.x, d.z, 14.5, 8); } },
+  { b: 15.5, f: (b, P) => { twoStep(b, lerp(0.15, 0.7, seg(b, 15.5, 16.5)), P); return P; } },
+  { b: 16, f: (b, P) => popPoint(b, P, 16.5) },
+  { b: 19, f: (b, P) => hatTip(b, P, 19.4, 0.8) },
+  { b: 20, f: (b, P) => spin(b, P, 20.3) },
+  { b: 22, f: (b, P) => toeStand(b, P, 22.3) },
+  { b: 24, f: (b, P) => glide(b, P, -1, 24) },
+  { b: 28, f: (b, P) => glide(b, P, 1, 28) },
+  { b: 32, f: (b, P) => hits(b, P, 32, 'F') },
+  { b: 36, f: (b, P) => spin(b, P, 36.2) },
+  { b: 38, f: (b, P) => popPoint(b, P, 38.4) },
+  { b: 40, f: (b, P) => taps(b, P) },
+  { b: 47.5, f: (b, P) => crouchPop(b, P, 47.9) },
+  { b: 48.4, f: (b, P) => handsToBrim(b, P, 48.5) },
+  { b: 50, f: (b, P) => lean(b, P, 50) },
+  { b: 53.6, f: (b, P) => hatTip(b, P, 53.7, 0.05) }
+];
+function sectionPose(list, b, i) {
+  const S = list[i];
+  return S.f(b, basePose(), S.b);
+}
+function leadAt(b) {
+  const list = LEAD_SECTIONS;
+  let i = 0;
+  while (i + 1 < list.length && b >= list[i + 1].b) i++;
+  let P = sectionPose(list, b, i);
+  if (i > 0 && b < list[i].b + 0.3) P = lerpPose(sectionPose(list, b, i - 1), P, smoothstep(list[i].b - 0.2, list[i].b + 0.3, b));
+  if (i + 1 < list.length && b > list[i + 1].b - 0.3) P = lerpPose(P, sectionPose(list, b, i + 1), smoothstep(list[i + 1].b - 0.3, list[i + 1].b + 0.2, b));
+  const [x, z] = leadXZ(b);
+  place(P, x, z);
+  P.hat = 1;
+  P.blink = Math.max(P.blink || 0, naturalBlink(b));
+  return P;
+}
+function naturalBlink(b) {
+  const k = Math.floor(b / 2.7);
+  return bump(b, k * 2.7 + 0.4 + hash(k * 7.7) * 1.8, 0.045);
+}
+
+// ---------------------------------------------------------------- the line of dancers
+const ENS = [
+  { style: 'a', slot: [-104, -48], from: [-440, -48], t0: 18, side: 'M', yaw: 0.18 },
+  { style: 'b', slot: [-60, -112], from: [-440, -112], t0: 19, side: 'M', yaw: 0.1 },
+  { style: 'c', slot: [104, -48], from: [440, -48], t0: 18.5, side: 'F', yaw: -0.18 },
+  { style: 'd', slot: [60, -112], from: [440, -112], t0: 19.5, side: 'F', yaw: -0.1 }
+];
+const ENS_ARRIVE = 26;
+function ensAt(b, e) {
+  const [x0, z0] = e.from, [x1, z1] = e.slot;
+  let P;
+  if (b < ENS_ARRIVE + 0.5) {
+    const u = clamp((b - e.t0) / (ENS_ARRIVE - e.t0), 0, 1);
+    const dx = x1 - x0, dz = z1 - z0, len = Math.hypot(dx, dz);
+    const speed = len / (ENS_ARRIVE - e.t0);
+    P = stride(b, basePose(), dx / len, dz / len, u > 0 && u < 1 ? speed / 2 : 0.001, e.t0);
+    if (u <= 0 || u >= 1) { twoStep(b, u >= 1 ? 0.55 : 0.1, P); }
+    place(P, lerp(x0, x1, u), lerp(z0, z1, u));
+    if (b > ENS_ARRIVE - 0.4) {
+      const Q = place(sectionEns(b, e), x1, z1);
+      P = lerpPose(P, Q, smoothstep(ENS_ARRIVE - 0.4, ENS_ARRIVE + 0.4, b));
+    }
+  } else {
+    P = place(sectionEns(b, e), x1, z1);
+  }
+  P.hat = 1;
+  P.blink = Math.max(P.blink || 0, naturalBlink(b + e.t0));
+  return P;
+}
+function sectionEns(b, e) {
+  const P = basePose();
+  const yaw = e.yaw;
+  if (b < 32) snapStep(b, P);
+  else if (b < 36) hits(b, P, 32, e.side);
+  else if (b < 40) { twoStep(b, 0.7, P); arm(P, 'M', 10, -2, 22, 0.5); arm(P, 'F', -10, 0, 24, 0.5); P.mX = 10; P.fX = -10; }
+  else if (b < 48) snapStep(b, P);
+  else if (b < 50) handsToBrim(b, P, 48.5);
+  else { handsToBrim(50, P, 48.5); P.hyaw = -Math.sign(e.slot[0]) * 0.55; P.smile = 0.2; }
+  P.pyaw += yaw;
+  return P;
+}
+
+// ---------------------------------------------------------------- the cast at time t
+function castAt(t) {
+  const b = t / BEAT;
+  const out = [{ id: 'lead', style: STYLES.lead, P: leadAt(b) }];
+  ENS.forEach((e, i) => out.push({ id: 'e' + i, style: STYLES[e.style], P: ensAt(b, e) }));
+  for (const c of out) c.J = solveRig(c.P);
+  return out;
+}
+
+// ---- 60-figure.js
+// ============================================================
+// The people of the club, painted stroke by stroke from a posed skeleton.
+// One painter dresses everybody: a cream-suited lead and dancers in dark suits and fedoras.
+// (face, hands and the light-shading helper live in 61-face.js)
+// ============================================================
+const ID = { coat: 1, lining: 2, blk: 3, skin: 4, hair: 5, mic: 6, ink: 7, lips: 8, white: 9 };
+const mat = (s, m, l, c) => ({ s, m, l, c });
+const MAT = {
+  skin: mat([0.5, 0.27, 0.27], [0.83, 0.53, 0.41], [0.96, 0.69, 0.53], [0.74, 0.55, 0.6]),
+  hair: mat([0.02, 0.015, 0.02], [0.08, 0.05, 0.05], [0.24, 0.15, 0.13], [0.2, 0.28, 0.5]),
+  // the lead: cream suit, teal shirt, white hat, black shoes
+  cream: mat([0.40, 0.33, 0.34], [0.84, 0.76, 0.62], [1.0, 0.95, 0.82], [0.45, 0.62, 0.95]),
+  teal: mat([0.03, 0.14, 0.24], [0.10, 0.44, 0.60], [0.34, 0.80, 0.90], [0.3, 0.6, 0.95]),
+  hatWhite: mat([0.42, 0.38, 0.38], [0.86, 0.82, 0.74], [1.0, 0.98, 0.9], [0.5, 0.65, 0.95]),
+  // the line of dancers: charcoal, brown, navy and plum suits
+  char: mat([0.02, 0.02, 0.04], [0.09, 0.09, 0.12], [0.26, 0.26, 0.34], [0.2, 0.3, 0.6]),
+  brown: mat([0.08, 0.04, 0.03], [0.26, 0.15, 0.10], [0.52, 0.34, 0.22], [0.3, 0.4, 0.7]),
+  navy: mat([0.01, 0.02, 0.08], [0.05, 0.09, 0.24], [0.16, 0.26, 0.5], [0.25, 0.45, 0.85]),
+  plum: mat([0.06, 0.02, 0.06], [0.22, 0.09, 0.22], [0.46, 0.24, 0.42], [0.3, 0.4, 0.75]),
+  shirtW: mat([0.35, 0.35, 0.44], [0.78, 0.78, 0.84], [1.0, 0.98, 0.95], [0.5, 0.65, 0.95]),
+  hatBlk: mat([0.01, 0.01, 0.02], [0.06, 0.06, 0.08], [0.2, 0.2, 0.27], [0.25, 0.35, 0.65]),
+  hatGry: mat([0.06, 0.06, 0.08], [0.22, 0.21, 0.24], [0.5, 0.48, 0.5], [0.3, 0.4, 0.7]),
+  shoe: mat([0.015, 0.015, 0.025], [0.06, 0.055, 0.08], [0.3, 0.28, 0.38], [0.22, 0.28, 0.55])
+};
+const STYLES = {
+  lead: { jacket: MAT.cream, trouser: MAT.cream, shirt: MAT.teal, tie: null, hat: MAT.hatWhite, band: [0.05, 0.05, 0.07], sock: MAT.teal, tilt: 0.16, hairLen: 0.6, lapel: [0.68, 0.6, 0.5] },
+  a: { jacket: MAT.char, trouser: MAT.char, shirt: MAT.shirtW, tie: [0.55, 0.08, 0.1], hat: MAT.hatBlk, band: [0.22, 0.22, 0.28], sock: MAT.char, tilt: -0.1, hairLen: 0.3, lapel: [0.03, 0.03, 0.05] },
+  b: { jacket: MAT.brown, trouser: MAT.brown, shirt: MAT.shirtW, tie: [0.1, 0.25, 0.4], hat: MAT.hatGry, band: [0.1, 0.06, 0.05], sock: MAT.char, tilt: 0.1, hairLen: 0.3, lapel: [0.1, 0.06, 0.04] },
+  c: { jacket: MAT.navy, trouser: MAT.navy, shirt: MAT.shirtW, tie: [0.6, 0.5, 0.15], hat: MAT.hatBlk, band: [0.5, 0.4, 0.15], sock: MAT.char, tilt: -0.14, hairLen: 0.3, lapel: [0.02, 0.03, 0.09] },
+  d: { jacket: MAT.plum, trouser: MAT.char, shirt: MAT.shirtW, tie: [0.12, 0.35, 0.3], hat: MAT.hatGry, band: [0.18, 0.06, 0.18], sock: MAT.char, tilt: 0.12, hairLen: 0.3, lapel: [0.08, 0.03, 0.08] }
+};
+G.style = STYLES.lead;
+
+function armDepth(J, which) {
+  const el = which === 'M' ? J.elM : J.elF, wr = which === 'M' ? J.wrM : J.wrF;
+  const mid = vlerp(el, wr, 0.6);
+  return mid.z - J.chest.z;
+}
+
+// ---------------------------------------------------------------- legs and shoes
+function drawSuitLegs(J, S) {
+  for (const s of ['L', 'R']) {
+    const sg = s === 'L' ? -1 : 1;
+    const hip = J['hip' + s], kn = J['kn' + s], an = J['an' + s], ft = J['foot' + s];
+    const top = vadd(hip, V(0, 7, 0));
+    const hem = vadd(vlerp(an, ft.ball, 0.4), V(0, S === STYLES.lead ? 2.2 : -0.6, 1.5));
+    G.mid = ID.mic;
+    const shoe = shade(MAT.shoe, vnorm(V(sg * 0.2, 0.6, 0.8)));
+    if (S === STYLES.lead) {
+      // a flash of teal sock between hem and loafer
+      st([vadd(an, V(0, 1.6, 0.4)), vadd(an, V(0, -2.4, 0.6))], 7.6, shade(S.sock, vnorm(V(sg * 0.2, 0.3, 1))), { dry: 0.2, h: 0.35, w0: 1, tip: 1 });
+    }
+    st([vadd(an, V(0, -1.5, 0.5)), vadd(ft.ball, V(0, 2.6, 0.5)), vadd(ft.toe, V(0, 1.7, 0))], [8.6, 10.2, 9.4], shoe, { dry: 0.1, h: 0.45, gloss: 0.95, w0: 0.95, tip: 0.9, tE: 0.2 });
+    st([vadd(ft.heel, V(-sg * 1, 1.2, 0)), vadd(ft.ball, V(0, 0.4, 0)), vadd(ft.toe, V(0, 0.6, 0.6))], [8.8, 10.4, 9.2], MAT.shoe.s, { a: 0.9, dry: 0.15, h: 0.3, w0: 0.95, tip: 0.9 });
+    dab(vadd(ft.toe, V(-1.6, 3.1, -0.6)), 1.5, 2.8, [0.55, 0.6, 0.75], { dry: 0.3, gloss: 1, a: 0.7, noShadow: true });
+    G.mid = ID.blk;
+    st([top, hip, kn, an, hem], [19.5, 18, 14.5, 12.4, 13], shade(S.trouser, vnorm(V(sg * 0.3, 0, 1))), { dry: 0.26, h: 0.32, tip: 0.95, tE: 0.12, sq: 0.6 });
+    const lit = vnorm(V(-1, 0.2, 0.5)), cool = vnorm(V(1, 0.2, 0.5));
+    st([vadd(kn, V(-5, 1, 2)), vadd(an, V(-4.2, 1, 2)), vadd(hem, V(-4.6, 1, 0))], 3.4, shade(S.trouser, lit), { a: 0.85, dry: 0.5, h: 0.3 });
+    st([vadd(kn, V(5, 1, 2)), vadd(an, V(4.2, 1, 2)), vadd(hem, V(4.6, 1, 0))], 2.4, shade(S.trouser, cool), { a: 0.8, dry: 0.55, h: 0.3 });
+    // the front crease
+    st([vadd(hip, V(-sg * 0.6, -5, 8.6)), vadd(kn, V(-sg * 0.4, 0, 7.6)), vadd(hem, V(-sg * 0.2, 1, 6.8))], 0.9, shade(S.trouser, vnorm(V(0, 0.3, 1)), -0.32), { a: 0.6, dry: 0.4, noShadow: true });
+    st([vadd(hem, V(-5.8, 1.4, -1)), vadd(hem, V(0, 0.4, 1.6)), vadd(hem, V(5.8, 1.4, -1))], 1.8, shade(S.trouser, V(0, -0.3, 0.6), -0.3), { a: 0.75, dry: 0.3, noShadow: true });
+  }
+}
+
+// ---------------------------------------------------------------- jacket, shirt, tie, lapels
+function drawSuitTorso(J, S, front) {
+  const Rc = J.Rc, Rw = J.Rw, Rp = J.Rp;
+  const isLead = S === STYLES.lead;
+  G.mid = ID.coat;
+  // neck first, so the collar and shirt sit on top of it
+  G.mid = ID.skin;
+  st([xf(J.neckTop, J.Rh, 0, 2.5, 1.5), xf(J.neck, Rc, 0, 4, 3)], 9.4, shade(MAT.skin, mv(J.Rh, V(0, -0.5, 0.8))), { tip: 0.9, w0: 0.9, dry: 0.15 });
+  G.mid = ID.coat;
+  // the jacket body: four broad planes from the hem up to the shoulder line, then the shoulders
+  for (const x of [-11.5, -3.8, 3.8, 11.5]) {
+    const n = mv(Rc, vnorm(V(x / 14, 0.1, front ? 1 : -1)));
+    const z = front ? 1 : -1;
+    st([xf(J.pelvis, Rp, x * 1.2, -10, 8 * z), xf(J.waist, Rw, x * 1.06, 0, 9 * z), xf(J.chest, Rc, x, 4, 10.5 * z), xf(J.neck, Rc, x * 0.9, 1, 5 * z)],
+      [15, 15, 15, 12], shade(S.jacket, n), { dry: 0.28, h: 0.34 });
+  }
+  st([xf(J.neck, Rc, -19.5, -3, 0.5), xf(J.neck, Rc, 0, 2.5, 2.5), xf(J.neck, Rc, 19.5, -3, 0.5)], 13, shade(S.jacket, mv(Rc, V(0, 0.8, 0.6))), { dry: 0.2, h: 0.4 });
+  // the drape: a soft dark fold on the shadow side and a lit one on the key side
+  st([xf(J.chest, Rc, -13, 2, 11.4 * (front ? 1 : -1)), xf(J.waist, Rw, -12, 0, 10.6 * (front ? 1 : -1)), xf(J.pelvis, Rp, -12, -9, 9 * (front ? 1 : -1))], 2.6, shade(S.jacket, mv(Rc, V(-0.9, 0, 0.5)), 0.14), { a: 0.75, dry: 0.5, h: 0.4, noShadow: true });
+  st([xf(J.chest, Rc, 13, 2, 11.4 * (front ? 1 : -1)), xf(J.waist, Rw, 12, 0, 10.6 * (front ? 1 : -1)), xf(J.pelvis, Rp, 12, -9, 9 * (front ? 1 : -1))], 2.2, shade(S.jacket, mv(Rc, V(0.9, 0, 0.4)), -0.2), { a: 0.7, dry: 0.5, h: 0.4, noShadow: true });
+  if (!front) {
+    // back vent
+    st([xf(J.waist, Rw, 0, -2, -10), xf(J.pelvis, Rp, 0, -10, -9)], 1.2, shade(S.jacket, V(0, 0, -1), -0.4), { a: 0.7, dry: 0.4, noShadow: true });
+    return;
+  }
+  // shirt and tie in the V of the jacket
+  G.mid = ID.white;
+  st([xf(J.neck, Rc, 0, 4.4, 6.6), xf(J.chest, Rc, 0, -3, 11.4), xf(J.chest, Rc, 0, -14, 12)], [10, 8.5, 3], shade(S.shirt, mv(Rc, V(0, 0.2, 1))), { dry: 0.1, h: 0.3, w0: 0.95, tip: 0.6 });
+  if (S.tie) {
+    G.mid = ID.ink;
+    st([xf(J.neck, Rc, 0, 2.6, 7.6), xf(J.chest, Rc, 0, -10, 12.4), xf(J.waist, Rw, 0, -3, 10.8)], [2.8, 4.2, 3.6], S.tie, { dry: 0.2, h: 0.5, gloss: 0.5, tip: 0.6 });
+  } else {
+    // open collar: two wings of teal shirt over the jacket
+    for (const sg of [-1, 1]) st([xf(J.neck, Rc, sg * 3.2, 4.4, 7), xf(J.neck, Rc, sg * 7.4, 3.6, 5.6), xf(J.chest, Rc, sg * 6.4, -1, 11.3)], [3.2, 4.2, 1.4], shade(S.shirt, mv(Rc, V(sg * 0.5, 0.4, 1)), sg < 0 ? 0.12 : -0.08), { dry: 0.15, h: 0.5, tip: 0.5 });
+  }
+  // lapels
+  G.mid = ID.coat;
+  for (const sg of [-1, 1]) {
+    const top = xf(J.neck, Rc, sg * 5, 3.5, 6.4), notch = xf(J.chest, Rc, sg * 13, 3, 11.4), brk = xf(J.chest, Rc, sg * 6, -17, 12.8);
+    const n = mv(Rc, vnorm(V(sg * 0.5, 0.35, 1)));
+    st([top, vlerp(top, notch, 0.55), notch, vlerp(notch, brk, 0.5), brk], [3, 5, 5.2, 4.2, 1.4], shade(S.jacket, n, 0.06), { dry: 0.22, h: 0.55, tip: 0.5 });
+    st([top, vadd(vlerp(top, brk, 0.5), mv(Rc, V(sg * 1.4, 0, 0.6))), brk], 1.3, S.lapel, { a: 0.7, dry: 0.4, noShadow: true });
+  }
+  // a pocket flap and a folded square at the breast
+  st([xf(J.waist, Rw, 8.5, 2, 10.6), xf(J.waist, Rw, 15, 1.2, 9.8)], 1.6, shade(S.jacket, mv(Rc, V(0.4, -0.2, 1)), -0.3), { a: 0.75, dry: 0.4, noShadow: true });
+  G.mid = ID.white;
+  dab(xf(J.chest, Rc, -11, 3, 12), 3.4, 1.5, isLead ? [0.98, 0.94, 0.88] : [0.85, 0.85, 0.9], { ang: 0.15, dry: 0.2, noShadow: true });
+}
+
+// ---------------------------------------------------------------- arms
+function drawSuitArm(J, S, which) {
+  const M = which === 'M';
+  const sh = M ? J.shM : J.shF, el = M ? J.elM : J.elF, wr = M ? J.wrM : J.wrF;
+  const sg = M ? -1 : 1;
+  G.mid = ID.coat;
+  const fo = vnorm(vsub(wr, el)), up = vnorm(vsub(el, sh));
+  const nl = vnorm(vadd(V(-0.7, 0.5, 0.6), vmul(V(0, 0, 1), 0.2)));
+  st([sh, el, wr], [15, 12.6, 10.6], [shade(S.jacket, vnorm(V(sg * 0.3, 0.4, 1))), shade(S.jacket, vnorm(V(sg * 0.2, 0, 1)), -0.06), shade(S.jacket, vnorm(V(sg * 0.2, -0.2, 1)), -0.1)], { dry: 0.22, h: 0.4, tip: 0.9 });
+  const pE = perpToward(vnorm(vadd(up, fo)), V(-1, 0.4, 0.6));
+  st([vmad(sh, pE, 4.2), vmad(el, pE, 4), vmad(wr, pE, 3.6)], [4.8, 4.4, 3.8], shade(S.jacket, nl, 0.06), { a: 0.9, dry: 0.4, h: 0.5, noShadow: true });
+  const pS = vmul(pE, -1);
+  st([vmad(sh, pS, 4.6), vmad(el, pS, 4.4), vmad(wr, pS, 3.8)], [3.4, 3.4, 3], shade(S.jacket, vnorm(V(sg, -0.1, 0.4)), -0.2), { a: 0.85, dry: 0.45, h: 0.4, noShadow: true });
+  st([vmad(el, up, -3.4), vmad(vmad(el, pE, -1.2), V(0, 0, 1), 3), vmad(el, fo, 3.4)], [0.6, 1.4, 0.6], shade(S.jacket, V(0, -0.4, 0.5), -0.34), { a: 0.7, dry: 0.4, noShadow: true });
+  // a sliver of cool rim light on the window side
+  const rimSide = perpToward(vnorm(vadd(up, fo)), V(sg, 0, -0.3));
+  st([vmad(sh, rimSide, 6.4), vmad(el, rimSide, 6), vmad(wr, rimSide, 5.2)], 1.0, [G.rimC || [0.6, 0.75, 1.0]].map(c => c)[0], { a: 0.5, dry: 0.5, noShadow: true, exact: true });
+  // white cuff
+  G.mid = ID.white;
+  const cf = vmad(wr, fo, -3.4);
+  const pF = perpToward(fo, V(0, 0, 1));
+  st([vmad(cf, pF, 5.2), vmad(vmad(cf, pF, 0), V(0, 0, 1), 2.2), vmad(cf, pF, -5.2)], 2.6, shade(S.shirt, V(0, 0.2, 1)), { a: 0.95, dry: 0.2, noShadow: true });
+  drawHand(J, which);
+}
+
+// ---------------------------------------------------------------- hair and the fedora
+function drawHair(J) {
+  const S = G.style;
+  G.mid = ID.hair;
+  const H = J.head, R = J.Rh;
+  const hp = (x, y, z) => xf(H, R, x, y, z);
+  const hn = (x, y, z) => mv(R, vnorm(V(x, y, z)));
+  const hair = (x, y, z, j) => shade(MAT.hair, hn(x, y, z), j);
+  // a short cut under the hat, longer at the temples and nape
+  st([hp(-7.4, 5.2, 3.6), hp(-7.6, 9, 5.4), hp(0, 11.4, 7), hp(7.6, 9, 5.4), hp(7.4, 5.2, 3.6)], 8, hair(0, 0.5, 1, -0.1), { dry: 0.2, h: 0.4, w0: 0.9, tip: 0.9 });
+  for (const sg of [-1, 1]) {
+    st([hp(sg * 7, 7.4, 3.4), hp(sg * 7.6, 3.6, 0.6), hp(sg * 7.4, -0.5, -4 * S.hairLen)], [3.6, 3.4, 2.2], hair(sg, 0.3, 0.3, -0.05), { dry: 0.3, h: 0.5 });
+    st([hp(sg * 6.8, 4.6, 6), hp(sg * 6.6, 0.4, 6.4)], 1.5, hair(sg, 0, 1, -0.1), { a: 0.8, dry: 0.4, noShadow: true });
+  }
+  drawHat(J, S);
+}
+
+function drawHat(J, S) {
+  const H = J.head, R = J.Rh, ps = J.pose;
+  const lift = ps.hatLift || 0;
+  let off = V(0, 0, 0);
+  if (lift > 0.01) {
+    const base = xf(H, R, 0, 8, 0);
+    const fo = vnorm(vsub(J.wrF, J.elF));
+    const tgt = vadd(vmad(J.wrF, fo, 6), V(0, 5, 3));
+    off = vmul(vsub(tgt, base), lift);
+  }
+  const tilt = S.tilt + (ps.hroll ? 0 : 0);
+  const hp = (x, y, z) => vadd(xf(H, R, x, y + tilt * x * 0.5, z), off);
+  const hn = (x, y, z) => mv(R, vnorm(V(x, y, z)));
+  const hs = (x, y, z, j) => shade(S.hat, hn(x, y, z), j);
+  G.mid = ID.coat;
+  // crown: a dark block-in, then vertical planes with the pinch at the top
+  st([hp(-8, 8.2, 3.4), hp(-7, 14.6, 4.4), hp(-4.6, 19.6, 4.2), hp(0, 19.2, 3.8), hp(4.6, 19.6, 4.2), hp(7, 14.6, 4.4), hp(8, 8.2, 3.4)], 9, hs(0, 0.2, 0.6, -0.3), { dry: 0.18, h: 0.4, w0: 0.9, tip: 0.9 });
+  for (const x0 of [-6, -3, 0, 3, 6]) {
+    const q = x0 * x0;
+    st([hp(x0, 8.8, 8.6 - 0.06 * q), hp(x0 * 0.94, 14.4, 9 - 0.05 * q), hp(x0 * 0.78, 19.4, 6.8 - 0.03 * q)], [4.4, 4.8, 3.8],
+      [hs(x0 * 0.1, 0.1, 1, -0.08), hs(x0 * 0.08, 0.5, 0.9, 0.02), hs(x0 * 0.06, 1, 0.4, 0.1)], { dry: 0.28, h: 0.55, gloss: 0.45, tip: 0.6 });
+  }
+  st([hp(0, 19.6, 6), hp(0, 16, 9.4)], 2.6, hs(0, -0.2, 0.7, -0.35), { a: 0.7, dry: 0.5, h: 0.4, noShadow: true });
+  // the band
+  G.mid = ID.blk;
+  st([hp(-8.2, 9.8, 4.4), hp(-5, 10.2, 8.8), hp(0, 10.4, 10.2), hp(5, 10.2, 8.8), hp(8.2, 9.8, 4.4)], 2.9, S.band, { dry: 0.15, h: 0.5, gloss: 0.6, noShadow: true });
+  // the brim: broad, snapped down at the front, with its shadow across the brow
+  G.mid = ID.coat;
+  const bw = [3, 5, 6.4, 7, 6.4, 5, 3];
+  st([hp(-15.5, 8.8, 0), hp(-13, 7.6, 8), hp(-7, 6.4, 15), hp(0, 5.6, 17.8), hp(7, 6.4, 15), hp(13, 7.6, 8), hp(15.5, 8.8, 0)], bw,
+    [hs(-1, 0.4, 0.5, -0.05), hs(-0.8, 0.6, 0.8), hs(-0.4, 0.7, 1), hs(0, 0.8, 1, 0.05), hs(0.4, 0.7, 1), hs(0.8, 0.6, 0.8), hs(1, 0.4, 0.5, -0.1)], { dry: 0.2, h: 0.45, gloss: 0.4, w0: 0.9, tip: 0.85 });
+  st([hp(-14, 8.2, -3), hp(-8, 7.4, -9), hp(0, 7.4, -11), hp(8, 7.4, -9), hp(14, 8.2, -3)], [4, 5, 5.4, 5, 4], hs(0, 0.6, -1, -0.25), { dry: 0.25, h: 0.35, w0: 0.9, tip: 0.9 });
+  st([hp(-9.5, 5.6, 11), hp(0, 4.6, 14), hp(9.5, 5.6, 11)], 4.4, [0.03, 0.02, 0.03], { a: 0.5, dry: 0.5, noShadow: true });
+  st([hp(-12, 8.2, 8.6), hp(-5, 7.2, 15.6), hp(2.4, 6.6, 17.4)], 1.1, hs(-0.6, 1, 0.6, 0.25), { a: 0.85, dry: 0.5, gloss: 0.8, noShadow: true });
+}
+
+// ---------------------------------------------------------------- head seen from behind
+function drawSuitHeadBack(J, S) {
+  const H = J.head, R = J.Rh;
+  const hp = (x, y, z) => xf(H, R, x, y, z);
+  const hn = (x, y, z) => mv(R, vnorm(V(x, y, z)));
+  G.mid = ID.skin;
+  st([hp(0, -13, -2.5), hp(0, -6, -3.5)], 9.6, shade(MAT.skin, hn(0, -0.2, -1)), { dry: 0.15, w0: 0.9, tip: 0.9 });
+  for (const sg of [-1, 1]) st([hp(sg * 6.8, 5, 0.5), hp(sg * 7.2, 0, 0.2), hp(sg * 6.6, -5, 0.8)], [3.2, 3.6, 3], shade(MAT.skin, hn(sg, 0, -0.3), -0.1), { dry: 0.15, h: 0.35 });
+  G.mid = ID.hair;
+  st([hp(0, -7.5, -4.5), hp(0, 0, -7.2), hp(0, 8, -6.2), hp(0, 11, -1)], [11.5, 14.5, 14, 11], shade(MAT.hair, hn(0, 0.1, -1), -0.1), { dry: 0.15, h: 0.45, w0: 0.9, tip: 0.8 });
+  drawHat(J, S);
+}
+
+// ---------------------------------------------------------------- one person
+function drawSuit(J, S) {
+  G.style = S;
+  const facing = mv(J.Rc, V(0, 0, 1)).z;
+  const front = facing > -0.15;
+  drawSuitLegs(J, S);
+  const mz = armDepth(J, 'M'), fz = armDepth(J, 'F');
+  if (mz < -3) drawSuitArm(J, S, 'M');
+  if (fz < -3) drawSuitArm(J, S, 'F');
+  drawSuitTorso(J, S, front);
+  if (mv(J.Rh, V(0, 0, 1)).z < -0.25) drawSuitHeadBack(J, S); else drawHead(J);
+  if (mz >= -3) drawSuitArm(J, S, 'M');
+  if (fz >= -3) drawSuitArm(J, S, 'F');
+}
+
+// a simple dark silhouette for floor shadows (mask pass)
+function drawSilSuit(J) {
+  const flat = { sq: 0.6 };
+  for (const s of ['L', 'R']) {
+    const hip = J['hip' + s], an = J['an' + s], ft = J['foot' + s];
+    st([vadd(hip, V(0, 7, 0)), hip, J['kn' + s], an, vadd(vlerp(an, ft.ball, 0.4), V(0, -0.6, 1.5))], [19, 17.5, 14, 12.5, 12.5], null, flat);
+    st([vadd(an, V(0, -1.5, 0.5)), vadd(ft.ball, V(0, 2, 0)), ft.toe], [9, 10.5, 9], null);
+  }
+  st([J.pelvis, J.waist, J.chest], 34, null, flat);
+  st([xf(J.shM, J.Rc, -3, 1, 0), J.neck, xf(J.shF, J.Rc, 3, 1, 0)], 15, null);
+  st([J.chest, J.neck, J.neckTop, J.head], [22, 12, 11, 13], null);
+  for (const M of [true, false]) {
+    const sh = M ? J.shM : J.shF, el = M ? J.elM : J.elF, wr = M ? J.wrM : J.wrF;
+    st([sh, el, wr], [15, 13, 11], null);
+    const fo = vnorm(vsub(wr, el));
+    dab(vmad(wr, fo, 5), 9, 9, null, { ang: screenAng(wr, vmad(wr, fo, 8)) });
+  }
+  const H = J.head, R = J.Rh;
+  st([xf(H, R, -15, 8, 0), xf(H, R, 0, 6, 15), xf(H, R, 15, 8, 0)], 6, null);
+  st([xf(H, R, 0, 8, 3), xf(H, R, 0, 19, 3)], 16, null);
+}
+
+// ---- 61-face.js
+// ============================================================
+// Face, hands and light shading, carried over from the original engine
+// (the suit, hat and body are in 60-figure.js)
+// ============================================================
+function shade(mat, n, jit) {
+  const dw = vdot(n, G.wDir), dc = vdot(n, G.cDir);
+  const lw = clamp(smoothstep(-0.45, 0.8, dw) * G.wI, 0, 1.25);
+  const lc = smoothstep(0.0, 0.85, dc) * G.cI;
+  if (G.pop) { const v = clamp(0.2 + 0.62 * smoothstep(0, 1.1, lw) + 0.18 * lc, 0, 1); return [v, v, v]; }
+  let c = mixc(mat.s, mat.m, smoothstep(0.0, 0.5, lw));
+  c = mixc(c, mat.l, smoothstep(0.5, 1.15, lw));
+  c = mixc(c, mat.c, clamp(lc * 0.45 * (1 - 0.6 * smoothstep(0.4, 1.0, lw)), 0, 1));
+  if (G.tint) c = [c[0] * G.tint[0], c[1] * G.tint[1], c[2] * G.tint[2]];
+  if (jit) c = scalec(c, 1 + jit);
+  return c;
+}
+
+function screenAng(p, q) {
+  const a = G.proj(p), b = G.proj(q);
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+function perpToward(dir, toward) {
+  let p = vcross(dir, V(0, 0, 1));
+  if (vlen(p) < 1e-4) p = V(1, 0, 0);
+  p = vnorm(p);
+  return vdot(p, toward) < 0 ? vmul(p, -1) : p;
+}
+
+
+function drawHead(J) {
+  const H = J.head, R = J.Rh, ps = J.pose;
+  const hp = (x, y, z) => xf(H, R, x, y, z);
+  const hn = (x, y, z) => mv(R, vnorm(V(x, y, z)));
+  const skin = (x, y, z, j) => shade(MAT.skin, hn(x, y, z), j);
+  G.mid = ID.skin;
+  // block in the head in a darker skin tone first, so no gaps open between the planes
+  st([hp(0, 8.5, 4.5), hp(0, 1, 5.5), hp(0, -7, 5.5), hp(0, -10, 5)], [13.4, 14.6, 13, 8], skin(0.2, -0.1, 0.5, -0.18), { dry: 0.05, h: 0.3, w0: 0.9, tip: 0.8 });
+  for (const sg of [-1, 1]) {
+    st([hp(sg * 6.6, 5, 1.5), hp(sg * 7.0, 0, 1.2), hp(sg * 6.4, -5, 1.8)], [3.2, 3.6, 3], skin(sg, 0, 0.2, -0.12), { dry: 0.15, h: 0.35 });
+    st([hp(sg * 7.2, 2.4, -0.4), hp(sg * 7.7, -0.3, -0.3), hp(sg * 7.0, -3.4, 0.2)], [2.0, 2.5, 1.8], skin(sg, 0, 0.35, -0.05), { dry: 0.2, h: 0.4 });
+  }
+  st([hp(0, 8.6, 7.6), hp(0, 3, 9.6), hp(0, -3, 9.8), hp(0, -8, 8.8), hp(0.1, -11.1, 7.2)], [12.2, 13.9, 13.2, 10.2, 5.4],
+    [skin(0, 0.5, 1), skin(0, 0.1, 1), skin(0, -0.1, 1), skin(0, -0.4, 1, -0.04), skin(0, -0.8, 0.6, -0.08)], { dry: 0.08, h: 0.35, w0: 0.9, tip: 0.8, c2: G.pop ? undefined : [0.86, 0.5, 0.42] });
+  st([hp(-3.7, 7.6, 8.2), hp(-4.7, 2, 8.6), hp(-4.4, -3.5, 8.4), hp(-3.1, -8, 7.8)], [4.4, 5, 4.6, 3.3],
+    [skin(-0.7, 0.4, 0.7, 0.05), skin(-0.8, 0, 0.6, 0.05), skin(-0.8, -0.2, 0.6, 0.03), skin(-0.6, -0.5, 0.6)], { dry: 0.2, h: 0.4 });
+  st([hp(5.6, 6.2, 6.4), hp(6.2, 1, 6.6), hp(5.7, -4.5, 6.0), hp(3.8, -8.8, 6.2)], [2.8, 3.2, 3.0, 2.3],
+    [skin(0.9, 0.2, 0.3, -0.1), skin(1, 0, 0.3, -0.12), skin(0.9, -0.2, 0.3, -0.12), skin(0.6, -0.6, 0.4, -0.1)], { a: 0.7, dry: 0.3, h: 0.4 });
+  st([hp(-3, 6.3, 9.2), hp(1.5, 6.7, 9.4)], 2.2, skin(-0.3, 0.6, 0.8, 0.08), { a: 0.7, dry: 0.4, noShadow: true });
+  for (const sg of [-1, 1]) {
+    if (!G.pop) dab(hp(sg * 4.3, -2.8, 8.5), 3.2, 3, [0.9, 0.46, 0.42], { kind: 1, a: 0.3, noShadow: true });
+    dab(hp(sg * 3.1, 1.3, 9.0), 3.2, 3.8, G.pop ? [0.45, 0.45, 0.45] : mixc(MAT.skin.s, MAT.skin.m, 0.45), { kind: 1, a: 0.45, ang: 0, noShadow: true });
+  }
+  // brows
+  G.mid = ID.ink;
+  const br = ps.brow * 0.8;
+  for (const sg of [-1, 1]) st([hp(sg * 1.3, 3.3 + br * 0.6, 9.8), hp(sg * 3.4, 3.95 + br, 9.6), hp(sg * 5.6, 3.3 + br * 0.5, 8.6)], [1.1, 1.3, 0.9], [0.4, 0.18, 0.11], { dry: 0.25, noShadow: true });
+  // eyes (free-side eye can wink)
+  for (const sg of [-1, 1]) {
+    const shut = clamp(ps.blink + (sg > 0 ? ps.wink : 0), 0, 1);
+    G.mid = ID.ink;
+    if (shut > 0.6) {
+      st([hp(sg * 1.9, 1.3, 9.4), hp(sg * 3.1, 0.8, 9.5), hp(sg * 4.4, 1.2, 9.0)], 0.6, [0.2, 0.1, 0.1], { dry: 0.2, noShadow: true });
+    } else {
+      st([hp(sg * 1.9, 1.2, 9.4), hp(sg * 3.1, 1.6 - shut + ps.brow * 0.25, 9.45), hp(sg * 4.4, 1.15, 9.0)], 0.9, [0.15, 0.08, 0.08], { dry: 0.1, w0: 0.8, tip: 0.6, noShadow: true });
+      dab(hp(sg * 3.0, 0.85, 9.45), 1.2 * (1 - shut) + 0.2 + ps.brow * 0.25, 1.1, [0.19, 0.12, 0.12], { ang: 0, noShadow: true });
+      G.mid = ID.white;
+      dab(hp(sg * 3.0 - 0.4, 1.2, 9.6), 0.4, 0.4, [0.95, 0.9, 0.88], { a: 0.75 * (1 - shut), noShadow: true });
+    }
+  }
+  // nose
+  G.mid = ID.skin;
+  st([hp(0.9, 2.2, 10.2), hp(1.3, -1.5, 11.0), hp(1.0, -3.3, 11.1)], [1.0, 1.25, 1.1], G.pop ? [0.3, 0.3, 0.3] : mixc(MAT.skin.s, MAT.skin.m, 0.35), { a: 0.75, dry: 0.3, noShadow: true });
+  dab(hp(-0.3, -2.6, 11.7), 1.6, 1.4, skin(-0.4, 0, 1, 0.08), { a: 0.8, noShadow: true });
+  dab(hp(0.2, -4.1, 10.9), 1.0, 2.4, G.pop ? [0.3, 0.3, 0.3] : [0.55, 0.3, 0.3], { a: 0.75, ang: 0, noShadow: true });
+  // mouth
+  const mo = ps.mouth, sm = ps.smile, mO = ps.mO || 0;
+  if (mO > 0.25) {
+    // a round "oh!" of surprise
+    G.mid = ID.ink;
+    dab(hp(0, -7.2, 9.8), 1.4 + 2.0 * mO, 1.8 + 2.4 * mO, [0.2, 0.06, 0.08], { ang: Math.PI / 2, dry: 0.05, noShadow: true });
+    G.mid = ID.lips;
+    st([hp(-1.2 - mO, -6.6, 9.4), hp(0, -5.6 + 0.2 * mO, 10.0), hp(1.2 + mO, -6.6, 9.4)], 0.8, [0.72, 0.36, 0.34], { dry: 0.2, noShadow: true });
+    st([hp(-1.1 - mO, -7.6, 9.4), hp(0, -8.9 - 0.9 * mO, 9.8), hp(1.1 + mO, -7.6, 9.4)], 1.0, [0.8, 0.44, 0.4], { dry: 0.2, noShadow: true });
+  } else if (mo > 0.15) {
+    G.mid = ID.ink;
+    dab(hp(0, -6.9 - mo * 0.5, 9.7), 1.0 + mo * 2.0, 3.0, [0.2, 0.06, 0.08], { ang: 0, dry: 0.05, noShadow: true });
+    G.mid = ID.lips;
+    st([hp(-2.5, -5.9, 9.1), hp(0, -5.8, 10.0), hp(2.5, -5.9, 9.1)], 0.8, [0.7, 0.34, 0.32], { dry: 0.2, noShadow: true });
+    st([hp(-2.0, -7.5 - mo * 1.0, 9.2), hp(0, -8.0 - mo * 1.1, 9.7), hp(2.0, -7.5 - mo * 1.0, 9.2)], 1.0, [0.8, 0.44, 0.4], { dry: 0.2, noShadow: true });
+  } else if (sm > 0.8) {
+    // the grin: teeth between the lips, corners pulled up
+    const k = (sm - 0.8) / 0.2;
+    G.mid = ID.ink;
+    st([hp(-3.0, -5.7 + sm * 0.5, 8.9), hp(0, -6.35, 10.0), hp(3.0, -5.7 + sm * 0.5, 8.9)], 0.75, [0.42, 0.14, 0.15], { dry: 0.15, noShadow: true });
+    G.mid = ID.white;
+    st([hp(-2.3, -6.1 + sm * 0.25, 9.3), hp(0, -6.75, 10.0), hp(2.3, -6.1 + sm * 0.25, 9.3)], 0.55 + 0.35 * k, [0.94, 0.9, 0.84], { dry: 0.2, noShadow: true, exact: true });
+    G.mid = ID.ink;
+    st([hp(-2.1, -6.6 + sm * 0.2, 9.3), hp(0, -7.25, 9.9), hp(2.1, -6.6 + sm * 0.2, 9.3)], 0.5, [0.35, 0.1, 0.12], { dry: 0.2, a: 0.8, noShadow: true });
+    G.mid = ID.lips;
+    st([hp(-1.6, -7.7, 9.5), hp(1.6, -7.7, 9.5)], 1.0, [0.82, 0.48, 0.44], { a: 0.7, dry: 0.3, noShadow: true });
+  } else {
+    G.mid = ID.ink;
+    st([hp(-2.8, -6.0 + sm * 0.7, 9.0), hp(0, -6.5, 10.0), hp(2.8, -6.0 + sm * 0.7, 9.0)], 0.8, [0.45, 0.15, 0.16], { dry: 0.15, noShadow: true });
+    G.mid = ID.lips;
+    st([hp(-1.5, -7.3, 9.5), hp(1.5, -7.3, 9.5)], 1.1, [0.82, 0.48, 0.44], { a: 0.75, dry: 0.3, noShadow: true });
+  }
+  G.mid = ID.skin;
+  dab(hp(-0.5, -9.6, 8.3), 2, 2.4, skin(-0.3, -0.5, 0.9, 0.06), { a: 0.5, noShadow: true });
+  drawHair(J);
+}
+
+
+function drawHand(J, which) {
+  const M = which === 'M';
+  const ps = J.pose;
+  const el = M ? J.elM : J.elF, wr = M ? J.wrM : J.wrF;
+  const fore = vnorm(vsub(wr, el));
+  let dir = fore;
+  if (!M) dir = vnorm(vadd(fore, V(0, 0.25, 0.2)));
+  const lat = perpToward(dir, V(M ? -1 : 1, 0, 0));
+  const knuck = vmad(wr, dir, 8.2);
+  G.mid = ID.skin;
+  const cS = shade(MAT.skin, vnorm(V(M ? -0.4 : 0.3, 0.3, 0.9)));
+  const cL = shade(MAT.skin, vnorm(V(-0.6, 0.5, 0.7)), 0.04);
+  const open = M ? (ps.mOpen || 0) : ps.fOpen * (1 - ps.fPoint);
+  st([vmad(wr, dir, 0.5), vmad(wr, dir, 4.8), knuck], [6.6, 8.2, 8.4 - open * 0.8], cS, { dry: 0.14, h: 0.45, w0: 0.9, tip: 0.85 });
+  if (open > 0.05) {
+    for (let i = 0; i < 4; i++) {
+      const o = (i - 1.5);
+      const base = vmad(knuck, lat, o * 1.9);
+      const fd = vnorm(vadd(dir, vmul(lat, o * 0.16 * open)));
+      const tip = vmad(vmad(base, fd, 1 + 6.2 * open), V(0, 0, 1), 0.6 * open);
+      st([vmad(base, fd, -1), tip], [2.0, 1.6], i === 0 ? cL : cS, { dry: 0.15, h: 0.4, tip: 0.7, w0: 0.9 });
+    }
+  } else {
+    st([vmad(knuck, lat, -3.8), vmad(vmad(knuck, V(0, 0, 1), 1.4), lat, 0), vmad(knuck, lat, 3.8)], 2.4, cL, { a: 0.85, dry: 0.3, noShadow: true });
+  }
+  if (!M && ps.fPoint > 0.05) {
+    const base = vmad(knuck, lat, -2.2);
+    st([vmad(base, dir, -1), vmad(base, dir, 1 + 7.5 * ps.fPoint)], [2.1, 1.7], cL, { dry: 0.12, h: 0.4, tip: 0.8, w0: 0.9 });
+  }
+  const th0 = vmad(vmad(wr, lat, -3.2), dir, 1.5);
+  st([th0, vmad(vmad(th0, dir, 4.2), lat, -1.2 - open * 1.5)], [2.5, 2.0], cS, { dry: 0.15, h: 0.4, tip: 0.8, w0: 0.9 });
+}
+
+
+// ---- 65-camera.js
+// ============================================================
+// Cameras and projection. A camera may carry a 2D "view" (scale + offset in device px)
+// applied after projection: that is how the pop-art panel and the gallery frame shrink
+// the whole painting without re-framing it.
+// ============================================================
+const WALL_Z = -260;
+const CAM_DIST = 560;
+const IDENT_VIEW = { s: 1, ox: 0, oy: 0 };
+
+function makeCam(pos, target, fovY, roll, view) {
+  const f = vnorm(vsub(target, pos));
+  const r = vnorm(vcross(f, V(0, 1, 0)));
+  const u = vcross(r, f);
+  const c = Math.cos(roll), s = Math.sin(roll);
+  return {
+    pos, f, r: vadd(vmul(r, c), vmul(u, s)), u: vsub(vmul(u, c), vmul(r, s)),
+    focal: (CH / 2) / Math.tan(fovY / 2), cx: CW / 2, cy: CH / 2, view: view || IDENT_VIEW
+  };
+}
+const withView = (cam, view) => Object.assign({}, cam, { view });
+function project(cam, p) {
+  const dx = p.x - cam.pos.x, dy = p.y - cam.pos.y, dz = p.z - cam.pos.z;
+  const x = dx * cam.r.x + dy * cam.r.y + dz * cam.r.z;
+  const y = dx * cam.u.x + dy * cam.u.y + dz * cam.u.z;
+  const z = Math.max(1, dx * cam.f.x + dy * cam.f.y + dz * cam.f.z);
+  const s = cam.focal / z;
+  const v = cam.view;
+  return { x: (cam.cx + x * s) * v.s + v.ox, y: (cam.cy - y * s) * v.s + v.oy, s: s * v.s };
+}
+// shadow of p cast by a point light onto the floor (y=0) or the back wall
+function shadowPoint(Lp, p) {
+  const d = vsub(p, Lp);
+  let tb = Infinity;
+  if (d.z < -1e-4) { const t = (WALL_Z + 0.5 - Lp.z) / d.z; if (t > 1) tb = t; }
+  if (d.y < -1e-4) { const t = (0.3 - Lp.y) / d.y; if (t > 1 && t < tb) tb = t; }
+  if (!isFinite(tb)) tb = 1;
+  return { p: vmad(Lp, d, tb), t: tb };
+}
+function projectShadow(cam, Lp, p, lean) {
+  const sp = shadowPoint(Lp, p);
+  if (lean && sp.p.y > 0.5) sp.p.x += lean * sp.p.y;   // pivot about the floor line
+  const q = project(cam, sp.p);
+  q.s *= sp.t;
+  return q;
+}
+// GPU view-projection matrix for the static world strokes, including the 2D view
+function camVP(cam) {
+  const sx = 2 * cam.focal / CW, sy = 2 * cam.focal / CH;
+  const r = cam.r, u = cam.u, f = cam.f, p = cam.pos;
+  const tr = -vdot(r, p), tu = -vdot(u, p), tf = -vdot(f, p);
+  const M = new Float32Array([
+    sx * r.x, sy * u.x, 0.5 * f.x, f.x,
+    sx * r.y, sy * u.y, 0.5 * f.y, f.y,
+    sx * r.z, sy * u.z, 0.5 * f.z, f.z,
+    sx * tr, sy * tu, 0.5 * tf, tf
+  ]);
+  const v = cam.view;
+  if (v.s !== 1 || v.ox || v.oy) {
+    const ax = v.s - 1 + 2 * v.ox / CW, ay = 1 - v.s - 2 * v.oy / CH;
+    for (let c = 0; c < 4; c++) {
+      M[c * 4] = v.s * M[c * 4] + ax * M[c * 4 + 3];
+      M[c * 4 + 1] = v.s * M[c * 4 + 1] + ay * M[c * 4 + 3];
+    }
+  }
+  return M;
+}
+// where a camera ray through p meets the plane z = zPlane (for putting things "behind" p)
+function rayToPlaneZ(cam, p, zPlane) {
+  const d = vsub(p, cam.pos);
+  const t = (zPlane - cam.pos.z) / (d.z || -1e-6);
+  return vmad(cam.pos, d, t);
+}
+
+// ---- 70-club.js
+// ============================================================
+// The club: a smoky nineteen-thirties speakeasy, painted once in world space and projected on the GPU.
+// A brick back wall with tall blue windows, a stair and railing on the left, a bar and bottle shelves on the
+// right, orange pendant lamps on cords, bentwood chairs and round tables with patrons in fedoras, and a dark
+// polished floor that will mirror the dancers.
+// Units are cm, y up, the floor at y = 0, the back wall at z = WALL_Z.
+// ============================================================
+function wst(pts, w, col, o, floor, normal) {
+  strokeWorld(pts, w, col, o || {}, floor ? V(0, 1, 0) : (normal || V(0, 0, 1)), [NO_IN, NO_OUT]);
+}
+function wdab(p, w, len, col, o) {
+  wst([V(p.x - len / 2, p.y, p.z), V(p.x + len / 2, p.y, p.z)], w, col, o);
+}
+const SET = {};
+const BRICK = [[0.42, 0.20, 0.15], [0.36, 0.17, 0.14], [0.48, 0.25, 0.18], [0.30, 0.15, 0.13], [0.45, 0.30, 0.22], [0.26, 0.14, 0.14], [0.52, 0.24, 0.16]];
+const WOOD = [[0.20, 0.11, 0.08], [0.16, 0.09, 0.07], [0.25, 0.14, 0.09], [0.13, 0.08, 0.07]];
+const LAMP_X = [-190, 70, 300];
+const LAMP_Y = 322;
+const WIN = [
+  { x: -335, y0: 118, w: 118, h: 178, arch: true },
+  { x: -70, y0: 118, w: 108, h: 178 },
+  { x: 175, y0: 118, w: 108, h: 178 }
+];
+
+function buildWall(rnd) {
+  const W = WALL_Z;
+  // dark underpainting so the gaps read as mortar and soot
+  for (let y = -10; y < 500; y += 38) {
+    for (let x = -820; x < 820; x += 210) wst([V(x, y + rnd() * 8, W - 0.2), V(x + 110, y + rnd() * 8, W - 0.2), V(x + 230, y + rnd() * 8, W - 0.2)], 52, [0.11 + rnd() * 0.03, 0.06, 0.06], { recv: 1, dry: 0.15, h: 0.12 });
+  }
+  // broad wall strokes, then courses of single bricks
+  for (let y = -6; y < 490; y += 21) {
+    let x = -800 + rnd() * 40;
+    while (x < 800) {
+      const len = 70 + rnd() * 110;
+      const c = BRICK[(rnd() * BRICK.length) | 0], k = 0.5 + rnd() * 0.22;
+      wst([V(x, y + rnd() * 4, W), V(x + len / 2, y + (rnd() - 0.5) * 5, W), V(x + len, y + rnd() * 4, W)], 25, scalec(c, k), { recv: 1, dry: 0.5, h: 0.28, sq: 0.55 });
+      x += len * (0.72 + rnd() * 0.2);
+    }
+  }
+  for (let row = 0; row < 56; row++) {
+    const y = 3 + row * 8.6;
+    for (let x = -800 + (row % 2) * 11.5; x < 800; x += 23) {
+      const r1 = rnd(), r2 = rnd(), r3 = rnd(), r4 = rnd();
+      if (r1 > 0.5) continue;
+      const c = BRICK[(r2 * BRICK.length) | 0], k = 0.62 + r3 * 0.4;
+      const hl = 7 + r4 * 3.5, dx = (r3 - 0.5) * 3;
+      wst([V(x + dx - hl, y + (r4 - 0.5) * 1.2, W + 0.2), V(x + dx + hl, y + (r3 - 0.5) * 1.2, W + 0.2)], 5.4 + r2 * 1.8, scalec(c, k), { recv: 1, dry: 0.3, h: 0.55, w0: 0.95, tip: 0.9, sq: 0.75, a: 0.75 + 0.25 * r1 / 0.5 });
+    }
+  }
+  // soot and damp streaks
+  for (let i = 0; i < 22; i++) {
+    const x = -700 + rnd() * 1400, y0 = 420 + rnd() * 60, y1 = y0 - 120 - rnd() * 200;
+    wst([V(x, y0, W + 0.3), V(x + (rnd() - 0.5) * 10, (y0 + y1) / 2, W + 0.3), V(x, y1, W + 0.3)], 10 + rnd() * 14, [0.04, 0.03, 0.05], { recv: 1, a: 0.3, dry: 0.7, w0: 0.9, tip: 0.2 });
+  }
+  // a wainscot of dark wood along the foot of the wall
+  for (let x = -820; x < 820; x += 22) wst([V(x, 0, W + 0.5), V(x, 62, W + 0.5)], 22, scalec(WOOD[(rnd() * 4) | 0], 0.9 + rnd() * 0.3), { recv: 1, dry: 0.2, h: 0.3, sq: 1, w0: 1, tip: 1 });
+  wst([V(-820, 64, W + 1), V(820, 64, W + 1)], 5, [0.32, 0.18, 0.1], { recv: 1, gloss: 0.6, dry: 0.2, h: 0.4 });
+  // ceiling beam and two iron posts framing the room
+  wst([V(-820, 468, W + 4), V(820, 468, W + 4)], 34, [0.06, 0.04, 0.05], { recv: 1, dry: 0.2, h: 0.3 });
+  for (const px of [-500, 470]) wst([V(px, 0, W + 30), V(px, 480, W + 30)], 20, [0.05, 0.05, 0.08], { recv: 1, dry: 0.2, h: 0.4, gloss: 0.5 });
+}
+
+function buildWindows(rnd) {
+  const W = WALL_Z;
+  for (const win of WIN) {
+    const { x, y0, w, h } = win;
+    const spring = y0 + h - w / 2;
+    // cool glow spilling out around each window (unlit, soft)
+    wdab(V(x, y0 + h * 0.5, W + 0.6), h * 1.5, w * 3.4, [0.12, 0.34, 0.56], { kind: 1, a: 0.32 });
+    // recessed frame
+    const half = yy => (win.arch && yy > spring ? Math.sqrt(Math.max(0, (w / 2) * (w / 2) - (yy - spring) * (yy - spring))) : w / 2);
+    for (let yy = y0 - 6; yy <= y0 + h + 4; yy += 8) {
+      const hw = half(yy) + 7;
+      wst([V(x - hw, yy, W + 0.8), V(x + hw, yy, W + 0.8)], 9, [0.05, 0.05, 0.08], { recv: 1, dry: 0.15, h: 0.35, sq: 1, w0: 1, tip: 1 });
+    }
+    // the panes: rows of luminous blue, brighter toward the top
+    for (let yy = y0; yy <= y0 + h; yy += 6) {
+      const hw = half(yy);
+      const k = (yy - y0) / h;
+      const c = mixc([0.10, 0.50, 0.82], [0.44, 0.86, 1.0], k * 0.7 + rnd() * 0.15);
+      wst([V(x - hw, yy, W + 1), V(x + hw, yy + (rnd() - 0.5), W + 1)], 7, c, { recv: 0, dry: 0.12, h: 0.14, sq: 1, w0: 1, tip: 1 });
+    }
+    // mullions
+    const cols = 3, rows = 5;
+    for (let i = 0; i <= cols; i++) {
+      const xx = x - w / 2 + i * w / cols;
+      const top = win.arch ? y0 + h - Math.max(0, (w / 2) - Math.sqrt(Math.max(0, (w / 2) * (w / 2) - (xx - x) * (xx - x)))) : y0 + h;
+      wst([V(xx, y0, W + 1.4), V(xx, top, W + 1.4)], 3.6, [0.04, 0.05, 0.08], { recv: 0.6, dry: 0.15, h: 0.4, w0: 1, tip: 1 });
+    }
+    for (let j = 0; j <= rows; j++) {
+      const yy = y0 + j * h / rows;
+      const hw = half(yy);
+      wst([V(x - hw, yy, W + 1.4), V(x + hw, yy, W + 1.4)], 3.2, [0.04, 0.05, 0.08], { recv: 0.6, dry: 0.15, h: 0.4, w0: 1, tip: 1 });
+    }
+    if (win.arch) {
+      for (let a = 0; a <= Math.PI + 1e-6; a += Math.PI / 12) {
+        wst([V(x, spring, W + 1.4), V(x + Math.cos(a) * w / 2, spring + Math.sin(a) * w / 2, W + 1.4)], 2.6, [0.04, 0.05, 0.08], { recv: 0.6, dry: 0.2, a: 0.9 });
+      }
+    }
+    // sill
+    wst([V(x - w / 2 - 8, y0 - 6, W + 3), V(x + w / 2 + 8, y0 - 6, W + 3)], 7, [0.14, 0.08, 0.06], { recv: 1, dry: 0.2, h: 0.5, gloss: 0.4 });
+  }
+}
+
+function buildStair(rnd) {
+  const W = WALL_Z, Z = W + 28;
+  const x0 = -520, n = 11, sw = 24, sh = 15;
+  // stringer and risers in shadow, treads catching a little light
+  wst([V(x0, 0, Z - 1), V(x0 + n * sw, n * sh, Z - 1)], 30, [0.06, 0.035, 0.03], { recv: 1, dry: 0.2, h: 0.3 });
+  for (let k = 0; k < n; k++) {
+    const x = x0 + k * sw, y = (k + 1) * sh;
+    wst([V(x, y - sh * 0.5, Z), V(x + sw, y - sh * 0.5, Z)], sh, scalec(WOOD[k % 4], 0.85), { recv: 1, dry: 0.2, h: 0.35, sq: 1, w0: 1, tip: 1 });
+    wst([V(x - 2, y + 0.5, Z + 0.4), V(x + sw + 2, y + 0.5, Z + 0.4)], 2.4, [0.5, 0.32, 0.2], { recv: 1, a: 0.7, dry: 0.4, gloss: 0.8 });
+  }
+  // landing and a door at the top
+  wst([V(x0 + n * sw, n * sh + 4, Z), V(x0 + n * sw + 90, n * sh + 4, Z)], 8, [0.2, 0.11, 0.08], { recv: 1, dry: 0.2, h: 0.4, sq: 1, w0: 1, tip: 1 });
+  wst([V(x0 + n * sw + 56, n * sh + 8, Z - 4), V(x0 + n * sw + 56, n * sh + 130, Z - 4)], 44, [0.10, 0.06, 0.05], { recv: 1, dry: 0.2, h: 0.4, sq: 1, w0: 1, tip: 1 });
+  // the railing: a handrail, iron balusters, and newel posts
+  wst([V(x0 - 6, 86, Z + 8), V(x0 + n * sw + 4, n * sh + 86, Z + 8)], 3.2, [0.04, 0.04, 0.06], { recv: 1, gloss: 0.7, dry: 0.2 });
+  wst([V(x0 - 6, 80, Z + 8), V(x0 + n * sw + 4, n * sh + 80, Z + 8)], 0.9, [0.55, 0.62, 0.8], { recv: 1, a: 0.5, dry: 0.4, gloss: 1 });
+  for (let k = 0; k <= n; k++) {
+    const x = x0 + k * sw;
+    wst([V(x, k * sh, Z + 8), V(x, k * sh + 84, Z + 8)], 1.6, [0.04, 0.04, 0.06], { recv: 1, dry: 0.2, a: 0.95 });
+  }
+}
+
+function buildBar(rnd) {
+  const W = WALL_Z;
+  // shelves and bottles on the wall, a mirror of lamplight behind them
+  wst([V(215, 180, W + 3), V(520, 180, W + 3)], 5, [0.25, 0.14, 0.09], { recv: 1, gloss: 0.6, dry: 0.2 });
+  wst([V(215, 240, W + 3), V(520, 240, W + 3)], 5, [0.25, 0.14, 0.09], { recv: 1, gloss: 0.6, dry: 0.2 });
+  const glass = [[0.90, 0.55, 0.12], [0.20, 0.55, 0.30], [0.75, 0.25, 0.10], [0.55, 0.60, 0.70], [0.85, 0.7, 0.2], [0.35, 0.15, 0.12]];
+  for (const sy of [182, 242]) {
+    for (let x = 226; x < 512; x += 12 + rnd() * 6) {
+      const h = 22 + rnd() * 20, c = glass[(rnd() * glass.length) | 0];
+      wst([V(x, sy + 2, W + 4), V(x, sy + 2 + h, W + 4)], 6.4 + rnd() * 2, c, { recv: 0.7, dry: 0.1, h: 0.5, gloss: 0.95, w0: 1, tip: 0.4, tE: 0.3 });
+      wst([V(x - 1.6, sy + 5, W + 4.4), V(x - 1.6, sy + h - 2, W + 4.4)], 1.1, [1, 0.95, 0.8], { recv: 0.5, a: 0.75, dry: 0.4 });
+    }
+  }
+  // counter: dark front panels, a polished top, a brass rail
+  for (let x = 205; x < 545; x += 22) wst([V(x, 0, W + 34), V(x, 92, W + 34)], 22, scalec(WOOD[(rnd() * 4) | 0], 0.85), { recv: 1, dry: 0.2, h: 0.35, sq: 1, w0: 1, tip: 1 });
+  wst([V(198, 98, W + 38), V(552, 98, W + 38)], 11, [0.36, 0.20, 0.11], { recv: 1, gloss: 0.9, dry: 0.15, h: 0.5, sq: 0.6 });
+  wst([V(200, 103, W + 38.6), V(550, 103, W + 38.6)], 1.6, [0.85, 0.6, 0.35], { recv: 1, a: 0.6, gloss: 1, dry: 0.4 });
+  wst([V(205, 22, W + 46), V(545, 22, W + 46)], 2.4, [0.75, 0.55, 0.25], { recv: 1, gloss: 1, dry: 0.3, a: 0.9 });
+  // the barman, back to us, polishing a glass
+  const bx = 360, bz = W + 22;
+  wst([V(bx, 58, bz), V(bx + 1, 132, bz)], 34, [0.05, 0.04, 0.06], { recv: 1, dry: 0.15, h: 0.3 });
+  wst([V(bx - 12, 128, bz + 0.3), V(bx + 12, 128, bz + 0.3)], 8, [0.90, 0.88, 0.85], { recv: 1, dry: 0.2 });
+  wdab(V(bx, 148, bz + 0.4), 15, 15, [0.35, 0.20, 0.15], { recv: 1, dry: 0.15, h: 0.5 });
+  wst([V(bx - 11, 154, bz + 0.6), V(bx + 11, 154, bz + 0.6)], 3, [0.05, 0.04, 0.05], { recv: 1 });
+  wst([V(bx - 6, 156, bz + 0.6), V(bx + 6, 156, bz + 0.6)], 12, [0.05, 0.04, 0.05], { recv: 1, sq: 1, w0: 1, tip: 1 });
+}
+
+// pendant lamps: a cord, a black cone shade, a hot bulb, a big soft glow and a faint cone of light
+function buildLamps(rnd) {
+  const W = WALL_Z;
+  for (const x of LAMP_X) {
+    const z = W + 60;
+    wst([V(x, 480, z), V(x, LAMP_Y + 28, z)], 1.4, [0.03, 0.03, 0.04], { recv: 0.5 });
+    wst([V(x - 22, LAMP_Y + 12, z + 0.2), V(x + 22, LAMP_Y + 12, z + 0.2)], 10, [0.03, 0.03, 0.04], { recv: 0.5, dry: 0.15, gloss: 0.6, sq: 0.8 });
+    wst([V(x - 9, LAMP_Y + 28, z + 0.2), V(x + 9, LAMP_Y + 28, z + 0.2)], 8, [0.03, 0.03, 0.04], { recv: 0.5, dry: 0.15 });
+    wdab(V(x, LAMP_Y + 3, z + 0.3), 7, 16, [1.0, 0.82, 0.5], { recv: 0, dry: 0.1, h: 0.5 });
+    wdab(V(x, LAMP_Y - 6, z + 0.1), 150, 190, [1.0, 0.55, 0.16], { kind: 1, a: 0.36 });
+    wdab(V(x, LAMP_Y - 4, z + 0.15), 54, 66, [1.0, 0.72, 0.32], { kind: 1, a: 0.5 });
+    // the cone
+    for (let i = 0; i < 5; i++) {
+      const s = (i - 2) * 26;
+      wst([V(x + s * 0.2, LAMP_Y, z), V(x + s, 0, z)], 12 + i % 2 * 5, [1.0, 0.6, 0.22], { kind: 1, a: 0.035, recv: 0 });
+    }
+  }
+}
+
+function buildFloor(rnd) {
+  const W = WALL_Z;
+  // boards running toward us, polished: the reflection of the dancers lives here
+  for (let x = -900; x < 900; x += 15) {
+    const c = [0.14 + rnd() * 0.05, 0.085 + rnd() * 0.03, 0.075 + rnd() * 0.03];
+    wst([V(x, 0, W), V(x + (rnd() - 0.5) * 3, 0, 60), V(x + (rnd() - 0.5) * 3, 0, 320)], 14.5, c, { recv: 1, gloss: 0.9, dry: 0.16, h: 0.25, sq: 1, w0: 1, tip: 1 }, true);
+    wst([V(x + 3, 0.03, W), V(x + 3, 0.03, 320)], 2.4, scalec(c, 1.5), { recv: 1, a: 0.3, dry: 0.6, gloss: 1 }, true);
+    wst([V(x + 7.6, 0.05, W), V(x + 7.6, 0.05, 320)], 1.0, [0.02, 0.012, 0.015], { recv: 0.8, a: 0.9 }, true);
+  }
+  for (let z = W + 50; z < 320; z += 46 + rnd() * 30) {
+    for (let x = -880; x < 880; x += 90 + rnd() * 90) wst([V(x, 0.06, z), V(x + 8, 0.06, z)], 0.9, [0.02, 0.012, 0.015], { recv: 0.8, a: 0.8 }, true);
+  }
+  // a scuffed dance floor: lighter, waxed, a loose oval where everyone dances
+  for (let z = -120; z < 120; z += 8) {
+    const hw = 260 * Math.sqrt(Math.max(0, 1 - (z - 0) * (z - 0) / (150 * 150)));
+    wst([V(-hw, 0.08, z), V(0, 0.08, z + (rnd() - 0.5) * 3), V(hw, 0.08, z)], 8, [0.30, 0.19, 0.13], { recv: 1, gloss: 1, a: 0.16, dry: 0.5 }, true);
+  }
+}
+
+function chair(x, z, dir, rnd) {
+  const c = [0.06, 0.04, 0.035];
+  for (const [dx, dz] of [[-9, -8], [9, -8], [-9, 9], [9, 9]]) wst([V(x + dx, 0, z + dz), V(x + dx * 1.1, 46, z + dz)], 2.2, c, { recv: 1, dry: 0.2, w0: 1, tip: 1 });
+  wst([V(x - 11, 46, z), V(x + 11, 46, z)], 5, c, { recv: 1, dry: 0.2, gloss: 0.5 });
+  wst([V(x - 9, 46, z - 9), V(x + 9, 46, z - 9)], 3, c, { recv: 1, dry: 0.2, gloss: 0.5 });
+  wst([V(x - 10, 47, z - 10), V(x - 11, 74, z - 10), V(x, 84, z - 10), V(x + 11, 74, z - 10), V(x + 10, 47, z - 10)], 2.4, c, { recv: 1, dry: 0.3, gloss: 0.6 });
+}
+function table(x, z, rnd) {
+  const c = [0.05, 0.04, 0.045];
+  wst([V(x, 0, z), V(x, 70, z)], 5, c, { recv: 1, dry: 0.2, h: 0.3 });
+  for (const dx of [-16, 16]) wst([V(x, 1.2, z), V(x + dx, 0.5, z + 5)], 4, c, { recv: 1 });
+  // top: a thin ellipse seen almost edge-on, catching the lamplight
+  for (let dz = -22; dz <= 22; dz += 5) {
+    const hw = 34 * Math.sqrt(Math.max(0, 1 - dz * dz / (24 * 24)));
+    wst([V(x - hw, 72, z + dz), V(x + hw, 72, z + dz)], 6, mixc([0.18, 0.09, 0.07], [0.42, 0.24, 0.14], (dz + 22) / 44), { recv: 1, gloss: 0.9, dry: 0.15, h: 0.4 }, true);
+  }
+  wst([V(x - 34, 72, z), V(x + 34, 72, z + 1)], 1.6, [0.85, 0.6, 0.35], { recv: 1, a: 0.5, gloss: 1, dry: 0.4 });
+  // a glass of something red and a candle
+  wst([V(x + 12, 73, z + 4), V(x + 12, 82, z + 4)], 5, [0.75, 0.10, 0.08], { recv: 0.4, dry: 0.1, gloss: 1, w0: 1, tip: 0.5, a: 0.9 });
+  wdab(V(x - 10, 80, z - 4), 3.4, 3.6, [1.0, 0.85, 0.5], { recv: 0, dry: 0.1 });
+  wdab(V(x - 10, 80, z - 4), 22, 22, [1.0, 0.6, 0.25], { kind: 1, a: 0.3 });
+}
+// a patron: a dark suit, a hat, a warm rim of lamplight on one shoulder
+function patron(x, z, seated, hatCol, jacket, faceDir) {
+  const yb = seated ? 44 : 60, top = seated ? 104 : 148;
+  wst([V(x, yb, z), V(x + faceDir * 1.5, top, z)], 32, jacket, { recv: 1, dry: 0.15, h: 0.3, w0: 1, tip: 0.6 });
+  wst([V(x - faceDir * 14, yb + 6, z + 0.2), V(x - faceDir * 15, top - 4, z + 0.2)], 3, [0.9, 0.55, 0.28], { recv: 1, a: 0.32, dry: 0.5, exact: true });
+  wst([V(x - 10, top + 2, z + 0.1), V(x + 10, top + 2, z + 0.1)], 6, jacket, { recv: 1, dry: 0.2 });
+  wdab(V(x + faceDir * 1.5, top + 12, z + 0.3), 13, 13, [0.30, 0.17, 0.12], { recv: 1, dry: 0.15, h: 0.5 });
+  wst([V(x - 14 + faceDir * 1.5, top + 19, z + 0.5), V(x + 14 + faceDir * 1.5, top + 19, z + 0.5)], 3.2, hatCol, { recv: 1, dry: 0.2, gloss: 0.4 });
+  wst([V(x - 7.5 + faceDir * 1.5, top + 20, z + 0.5), V(x - 6.5 + faceDir * 1.5, top + 31, z + 0.5), V(x + 6.5 + faceDir * 1.5, top + 31, z + 0.5), V(x + 7.5 + faceDir * 1.5, top + 20, z + 0.5)], 7, hatCol, { recv: 1, dry: 0.2, gloss: 0.4, w0: 1, tip: 1 });
+}
+
+function buildRoom(rnd) {
+  const dark = [[0.04, 0.035, 0.05], [0.07, 0.05, 0.05], [0.05, 0.06, 0.08], [0.09, 0.05, 0.07]];
+  const hats = [[0.05, 0.05, 0.06], [0.16, 0.14, 0.13], [0.08, 0.07, 0.09], [0.22, 0.2, 0.18]];
+  const P = () => [dark[(rnd() * 4) | 0], hats[(rnd() * 4) | 0]];
+  // tables at several depths, each with two or three chairs and people on them
+  const tables = [[-255, -105], [285, -95], [-430, 10], [430, 40], [-150, -190], [380, -180], [-40, -215]];
+  for (const [x, z] of tables) {
+    table(x, z, rnd);
+    for (const s of [-1, 1]) {
+      const [j, h] = P();
+      chair(x + s * 40, z - 6, s, rnd);
+      if (rnd() < 0.85) patron(x + s * 38, z - 8, true, h, j, -s);
+    }
+  }
+  // people standing at the back wall and along the bar
+  for (const x of [-140, -100, -15, 30, 120, 150, 250, 300, 420, 470]) {
+    const [j, h] = P();
+    patron(x + (rnd() - 0.5) * 14, WALL_Z + 30 + rnd() * 24, false, h, j, rnd() < 0.5 ? -1 : 1);
+  }
+  // big dark shapes of patrons in the foreground, backs to us, framing the picture
+  for (const [x, z, s] of [[-330, 180, 1.0], [-250, 200, 0.9], [340, 200, 1.0], [420, 170, 1.1]]) {
+    const [j, h] = P();
+    wst([V(x, 30, z), V(x, 120, z)], 42, j, { recv: 1, dry: 0.15, h: 0.3, w0: 1, tip: 0.7 });
+    wdab(V(x, 142, z + 0.3), 20, 20, [0.05, 0.04, 0.05], { recv: 1 });
+    wst([V(x - 22, 154, z + 0.5), V(x + 22, 154, z + 0.5)], 4.4, h, { recv: 1, gloss: 0.4 });
+    wst([V(x - 11, 156, z + 0.5), V(x - 10, 174, z + 0.5), V(x + 10, 174, z + 0.5), V(x + 11, 156, z + 0.5)], 11, h, { recv: 1, gloss: 0.4, w0: 1, tip: 1 });
+  }
+}
+
+function buildHaze(rnd) {
+  // a static veil of smoke at several depths, lit by the lamps
+  for (let i = 0; i < 26; i++) {
+    const y = 40 + rnd() * 420, z = WALL_Z + rnd() * 460;
+    const x = -700 + rnd() * 1400, len = 260 + rnd() * 480;
+    wst([V(x, y, z), V(x + len * 0.5, y + (rnd() - 0.5) * 18, z), V(x + len, y + (rnd() - 0.5) * 12, z)], 30 + rnd() * 40, [0.58, 0.62, 0.78], { kind: 1, a: 0.05 + rnd() * 0.06, recv: 1 });
+  }
+}
+
+function buildSets() {
+  const mk = fn => { const b = new StrokeBuf(true); G.buf = b; G.layer = 'bg'; fn(); b.dirty = true; return b; };
+  SET.club = mk(() => {
+    const rnd = mulberry(1937);
+    buildWall(rnd);
+    buildWindows(rnd);
+    buildStair(rnd);
+    buildBar(rnd);
+    buildFloor(rnd);
+    buildRoom(rnd);
+    buildLamps(rnd);
+    buildHaze(rnd);
+  });
+}
+
+// ---- 75-scenes.js
+// ============================================================
+// Camera, lights and the moving atmosphere for the club scene.
+// Beats:  0 wide, the lead waits | 8 he walks out | 14 the spot finds him | 18 the line arrives |
+//        24 glide | 32 hits | 40 low shot, the feet | 48.5 everything stops | 50 the lean | 54 hat tip | 56 end
+// ============================================================
+
+// [beat, visible height at the dancers (cm), look-at x, look-at y, camera height above look-at, roll (rad)]
+const CAM_KEYS = [
+  [0, 336, 78, 120, 30, 0.0], [8, 318, 46, 112, 24, 0.0],
+  [16, 268, 4, 102, 14, 0.0], [24, 252, -6, 104, 12, 0.0],
+  [32, 238, 0, 100, 10, 0.0], [39.5, 242, 0, 100, 10, 0.0],
+  [41.2, 178, 0, 66, -4, 0.0], [47.2, 172, 0, 66, -4, 0.0],
+  [48.6, 238, 0, 102, 8, 0.0], [50, 252, 14, 104, 8, 0.0], [53.2, 252, 14, 104, 8, 0.0],
+  [55.2, 208, 0, 112, 6, 0.0], [56, 204, 0, 112, 6, 0.0]
+];
+function cameraAt(t) {
+  const b = t / BEAT;
+  let i = 0;
+  while (i + 1 < CAM_KEYS.length && b >= CAM_KEYS[i + 1][0]) i++;
+  const k0 = CAM_KEYS[i], k1 = CAM_KEYS[Math.min(i + 1, CAM_KEYS.length - 1)];
+  const u = k1[0] > k0[0] ? easeInOut(clamp((b - k0[0]) / (k1[0] - k0[0]), 0, 1)) : 0;
+  let viewH = lerp(k0[1], k1[1], u), tx = lerp(k0[2], k1[2], u), ty = lerp(k0[3], k1[3], u);
+  const yOff = lerp(k0[4], k1[4], u), roll = lerp(k0[5], k1[5], u);
+  // a whisper of handheld drift, and a small push on every bar line
+  tx += 1.6 * Math.sin(t * 0.7) + 0.8 * Math.sin(t * 1.9 + 1);
+  ty += 1.1 * Math.sin(t * 0.9 + 2);
+  if (!REDUCED) viewH *= 1 - 0.012 * Math.pow(dip(b / 4), 2);
+  const asp = CW / CH;
+  if (asp < 1.1) { const need = 200 / asp; if (need > viewH) { ty += (need - viewH) * 0.1; viewH = need; } }
+  const fov = 2 * Math.atan((viewH / 2) / CAM_DIST);
+  return makeCam(V(tx * 0.75, ty + yOff, CAM_DIST), V(tx, ty, 0), fov, roll + 0.004 * Math.sin(t * 0.6));
+}
+
+// how brightly the follow-spot burns: it finds him as he reaches the mark, narrows for the lean, dies at the end
+function spotOn(b) {
+  const on = smoothstep(12.6, 14.6, b) * (1 - smoothstep(55.3, 56, b));
+  const pulse = 1 + 0.05 * hitPulse('kick', b * BEAT, 0.2) + 0.09 * hitPulse('snare', b * BEAT, 0.12) + 0.14 * hitPulse('crash', b * BEAT, 0.4);
+  return on * pulse;
+}
+function lightsFor(b) {
+  const on = spotOn(b);
+  return {
+    // key: a warm spot from above and in front, slightly to his left; rim: cool light through the windows behind
+    w: V(-140, 420, 300), c: V(320, 150, -300),
+    wI: 0.5 + 0.75 * on, cI: 1.0 + 0.1 * hitPulse('kick', b * BEAT, 0.15)
+  };
+}
+const LOOK = { tint: null, rimW: [1.0, 0.82, 0.55], rimC: [0.45, 0.72, 1.0] };
+
+// world-space ellipse on the screen, as the composite expects: [cx, cy (from the bottom), rx, ry]
+function poolAt(cam, p, rxCm, ryCm) {
+  const q = project(cam, p);
+  return [q.x, CH - q.y, rxCm * q.s, ryCm * q.s];
+}
+
+// smoke that drifts and curls through the room, and the faint cone of the follow-spot
+function drawSmoke(t, b, cam, lead) {
+  const rnd = mulberry(4711);
+  G.mid = 0;
+  for (let i = 0; i < 18; i++) {
+    const y = 26 + rnd() * 400, z = WALL_Z + 30 + rnd() * 560;
+    const x0 = -650 + rnd() * 1300, len = 200 + rnd() * 340, sp = 0.15 + rnd() * 0.35, ph = rnd() * TAU, amp = 50 + rnd() * 90;
+    const w = 26 + rnd() * 34;
+    const x = x0 + Math.sin(t * sp + ph) * amp;
+    const y1 = y + 10 * Math.sin(t * 0.55 + ph), y2 = y + 14 * Math.sin(t * 0.4 + ph * 2);
+    st([V(x, y, z), V(x + len * 0.5, y1, z), V(x + len, y2, z)], [w * 0.6, w, w * 0.5], [0.60, 0.64, 0.82],
+      { kind: 1, a: 0.045 + rnd() * 0.05, recv: 1, dry: 0.3 });
+  }
+  const on = spotOn(b);
+  if (on > 0.02) {
+    const [lx, lz] = leadXZ(b);
+    for (let k = -2; k <= 2; k++) {
+      st([V(lx * 0.4 - 90 + k * 6, 480, lz - 70), V(lx + k * 22, 0, lz)], [4, 28 + Math.abs(k) * 4], [1.0, 0.86, 0.6],
+        { kind: 1, a: 0.032 * on, recv: 0, dry: 0.2 });
+    }
+  }
+  // dust turning in the beam
+  for (let i = 0; i < 26; i++) {
+    const [lx, lz] = leadXZ(b);
+    const ph = i * 2.37;
+    const x = lx + 90 * Math.sin(t * 0.3 + ph) * (0.4 + (i % 5) * 0.15), y = 30 + ((t * 8 + i * 37) % 340), z = lz + 60 * Math.cos(t * 0.27 + ph * 1.3);
+    dab(V(x, y, z), 1.8, 2.4, [1.0, 0.9, 0.7], { a: 0.5 * on, kind: 0, dry: 0.2, noShadow: true });
+  }
+}
+
+// ---- 80-audio.js
+// ============================================================
+// The soundtrack: an original score, synthesised live with WebAudio and locked to the picture.
+// A smoky room tone, a heartbeat, a walking groove that grows into a full funk band (rolling bass riff,
+// off-beat stabs, bells, brass), hits that land exactly on the dancers' flung arms, a thin section for the
+// tap dance, a full stop, and a final swell for the lean. G minor, 112 BPM, 14 bars = 30 seconds.
+// No samples, and nothing borrowed.
+const mtof = n => 440 * Math.pow(2, (n - 69) / 12);
+const AUDIO = { ctx: null, out: null, rev: null, gate: null, noise: null, master: null, t0: 0, running: false, idx: 0, loop: 0, muted: false };
+
+function audioSetup() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return false;
+  let ctx;
+  try { ctx = new AC({ latencyHint: 'interactive' }); } catch (e) { return false; }
+  Object.assign(AUDIO, { ctx }, buildGraph(ctx));
+  return true;
+}
+// the mixing desk: a bus into shelving EQ and a glue compressor; hall, gated and echo sends
+function buildGraph(ctx) {
+  const master = ctx.createGain(); master.gain.value = 0.8;
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -15; comp.knee.value = 12; comp.ratio.value = 3.2; comp.attack.value = 0.004; comp.release.value = 0.2;
+  const bus = ctx.createGain(); bus.gain.value = 0.5;
+  const lowS = ctx.createBiquadFilter(); lowS.type = 'lowshelf'; lowS.frequency.value = 90; lowS.gain.value = 0.5;
+  const highS = ctx.createBiquadFilter(); highS.type = 'highshelf'; highS.frequency.value = 6500; highS.gain.value = 4.5;
+  bus.connect(lowS); lowS.connect(highS); highS.connect(comp); comp.connect(master); master.connect(ctx.destination);
+  const rev = ctx.createConvolver(); rev.buffer = impulse(ctx, 2.6, 3.4, false);
+  const revG = ctx.createGain(); revG.gain.value = 0.32; rev.connect(revG); revG.connect(bus);
+  const gate = ctx.createConvolver(); gate.buffer = impulse(ctx, 0.33, 0, true);
+  const gateG = ctx.createGain(); gateG.gain.value = 0.42; gate.connect(gateG); gateG.connect(bus);
+  // an eighties dotted-eighth echo for the leads, bouncing left and right
+  const echo = ctx.createGain();
+  const dl = ctx.createDelay(2), dr = ctx.createDelay(2); dl.delayTime.value = BEAT * 0.75; dr.delayTime.value = BEAT * 0.75;
+  const fb = ctx.createGain(); fb.gain.value = 0.32;
+  const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 3200;
+  const pl = ctx.createStereoPanner(), pr = ctx.createStereoPanner(); pl.pan.value = -0.7; pr.pan.value = 0.7;
+  const wet = ctx.createGain(); wet.gain.value = 0.26;
+  echo.connect(tone); tone.connect(dl); dl.connect(pl); dl.connect(dr); dr.connect(pr); dr.connect(fb); fb.connect(dl);
+  pl.connect(wet); pr.connect(wet); wet.connect(bus);
+  const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+  const nd = nb.getChannelData(0);
+  const r = mulberry(99);
+  for (let i = 0; i < nd.length; i++) nd[i] = r() * 2 - 1;
+  return { out: bus, rev, gate, noise: nb, master, echo, comp };
+}
+// Debug: render beats [b0, b1) of the score offline through the same desk and measure it.
+async function audioMeasure(b0, b1, only) {
+  const sr = 22050, t0 = b0 * BEAT, t1 = b1 * BEAT;
+  const off = new OfflineAudioContext(2, Math.ceil(sr * (t1 - t0 + 2)), sr);
+  const saved = Object.assign({}, AUDIO);
+  Object.assign(AUDIO, { ctx: off }, buildGraph(off));
+  let errs = 0;
+  for (const e of SCORE) if (e.t >= t0 && e.t < t1 && (!only || only.includes(e.fn))) { try { e.fn(e.t - t0 + 0.01, ...e.a); } catch (x) { errs++; } }
+  const buf = await off.startRendering();
+  Object.assign(AUDIO, saved);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  const spb = Math.round(BAR * sr), bars = [];
+  let pk = 0;
+  for (let k = 0; k * spb < L.length - sr; k++) {
+    let s2 = 0, p = 0;
+    for (let i = k * spb; i < (k + 1) * spb && i < L.length; i++) { s2 += L[i] * L[i] + R[i] * R[i]; p = Math.max(p, Math.abs(L[i]), Math.abs(R[i])); }
+    pk = Math.max(pk, p);
+    bars.push(+(10 * Math.log10(s2 / (2 * spb) + 1e-12)).toFixed(1));
+  }
+  return { errs, peakDb: +(20 * Math.log10(pk + 1e-12)).toFixed(2), barsRms: bars, buf };
+}
+// Render the whole score offline (through the same desk) to a 16-bit stereo WAV, base64-encoded.
+// Used by tools/render.py to put the soundtrack under the frame-by-frame video.
+async function audioRenderWav(sr, peakDb) {
+  sr = sr || 44100;
+  const off = new OfflineAudioContext(2, Math.ceil(sr * (DUR + 3)), sr);
+  const saved = Object.assign({}, AUDIO);
+  Object.assign(AUDIO, { ctx: off }, buildGraph(off));
+  let errs = 0;
+  for (const e of SCORE) { try { e.fn(e.t + 0.01, ...e.a); } catch (x) { errs++; } }
+  const buf = await off.startRendering();
+  Object.assign(AUDIO, saved);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  const n = Math.min(L.length, Math.round(sr * DUR) + Math.round(sr * 0.01));
+  const skip = Math.round(sr * 0.01);            // drop the 10 ms lead-in used to schedule events
+  const len = n - skip;
+  let pk = 0;
+  for (let i = skip; i < n; i++) pk = Math.max(pk, Math.abs(L[i]), Math.abs(R[i]));
+  const gain = Math.pow(10, (peakDb === undefined ? -1.5 : peakDb) / 20) / (pk || 1);
+  const fade = Math.round(sr * 0.25);
+  const bytes = new Uint8Array(44 + len * 4);
+  const dv = new DataView(bytes.buffer);
+  const wr = (o, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(o + i, str.charCodeAt(i)); };
+  wr(0, 'RIFF'); dv.setUint32(4, 36 + len * 4, true); wr(8, 'WAVEfmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+  dv.setUint16(22, 2, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true);
+  wr(36, 'data'); dv.setUint32(40, len * 4, true);
+  for (let i = 0; i < len; i++) {
+    const f = i > len - fade ? (len - i) / fade : 1;
+    dv.setInt16(44 + i * 4, clamp(L[i + skip] * gain * f, -1, 1) * 32767, true);
+    dv.setInt16(46 + i * 4, clamp(R[i + skip] * gain * f, -1, 1) * 32767, true);
+  }
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return { errs, peakDb: +(20 * Math.log10(pk + 1e-12)).toFixed(2), seconds: +(len / sr).toFixed(3), b64: btoa(bin) };
+}
+function impulse(ctx, dur, decay, gated) {
+  const n = Math.floor(ctx.sampleRate * dur), b = ctx.createBuffer(2, n, ctx.sampleRate);
+  const r = mulberry(gated ? 7 : 11);
+  for (let c = 0; c < 2; c++) {
+    const d = b.getChannelData(c);
+    for (let i = 0; i < n; i++) {
+      const x = i / n;
+      const e = gated ? (x < 0.88 ? 1 - 0.35 * x : (1 - x) * 5.4) : Math.pow(1 - x, decay);
+      d[i] = (r() * 2 - 1) * e;
+    }
+  }
+  return b;
+}
+const A_gain = v => { const g = AUDIO.ctx.createGain(); g.gain.value = v; return g; };
+function send(node, dest, amt) { if (amt > 0) { const g = A_gain(amt); node.connect(g); g.connect(dest); } }
+function osc(type, f, t, end) {
+  const o = AUDIO.ctx.createOscillator(); o.type = type; o.frequency.value = f; o.start(t); o.stop(end); return o;
+}
+function noiseSrc(t, end) {
+  const s = AUDIO.ctx.createBufferSource(); s.buffer = AUDIO.noise; s.loop = true;
+  s.start(t, (t * 7.31) % 1.5); s.stop(end); return s;
+}
+function noiseHit(t, dur, type, freq, v, q, sRev, sGate, pan) {
+  const ctx = AUDIO.ctx;
+  const s = noiseSrc(t, t + dur + 0.03);
+  const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; if (q) f.Q.value = q;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0004, t + dur);
+  s.connect(f); f.connect(g);
+  let out = g;
+  if (pan) { const p = ctx.createStereoPanner(); p.pan.value = pan; g.connect(p); out = p; }
+  out.connect(AUDIO.out);
+  send(out, AUDIO.rev, sRev || 0); send(out, AUDIO.gate, sGate || 0);
+  return { s, f, g };
+}
+
+// ---------------------------------------------------------------- instruments
+const I = {};
+I.kick = (t, v = 1) => {
+  const ctx = AUDIO.ctx;
+  const o = osc('sine', 160, t, t + 0.45);
+  o.frequency.setValueAtTime(165, t); o.frequency.exponentialRampToValueAtTime(46, t + 0.12);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(1.05 * v, t + 0.004); g.gain.exponentialRampToValueAtTime(0.001, t + 0.42);
+  o.connect(g); g.connect(AUDIO.out);
+  noiseHit(t, 0.012, 'highpass', 2600, 0.22 * v);
+};
+I.snare = (t, v = 1) => {
+  noiseHit(t, 0.19, 'bandpass', 1900, 0.8 * v, 0.7, 0.08, 1.0);
+  noiseHit(t, 0.07, 'highpass', 4800, 0.4 * v, 0.7, 0.04, 0.35);
+  const o = osc('triangle', 200, t, t + 0.15);
+  o.frequency.setValueAtTime(205, t); o.frequency.exponentialRampToValueAtTime(160, t + 0.08);
+  const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0.5 * v, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.gate, 0.5);
+};
+I.clap = (t, v = 1) => {
+  for (let k = 0; k < 3; k++) noiseHit(t + k * 0.011, 0.012, 'bandpass', 1500, 1.8 * v, 1.2);
+  noiseHit(t + 0.033, 0.17, 'bandpass', 1400, 1.5 * v, 1.0, 0.35);
+};
+I.snap = (t, v = 1) => noiseHit(t, 0.03, 'bandpass', 2700, 0.8 * v, 3, 0.25);
+I.hat = (t, v = 1, open) => noiseHit(t, open ? 0.3 : 0.05, 'highpass', 7200, (open ? 0.75 : 0.66) * v, 0.8, 0.04, 0, 0.25);
+I.crash = (t, v = 1) => noiseHit(t, 1.9, 'highpass', 4200, 0.42 * v, 0.5, 0.3);
+I.tom = (t, n, v = 1) => {
+  const f = mtof(n);
+  const o = osc('sine', f, t, t + 0.42);
+  o.frequency.setValueAtTime(f * 1.7, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.07);
+  const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.85 * v, t + 0.004); g.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
+  o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.gate, 0.4);
+};
+I.timp = (t, n, v = 1) => {
+  const f = mtof(n);
+  const o = osc('sine', f, t, t + 1.6);
+  o.frequency.setValueAtTime(f * 1.15, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.2);
+  const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.6 * v, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
+  o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.3);
+  noiseHit(t, 0.08, 'lowpass', 500, 0.3 * v);
+};
+// the eighties octave bass
+I.bass = (t, n, dur, v = 1) => {
+  const ctx = AUDIO.ctx, f = mtof(n), end = t + dur + 0.08;
+  const o1 = osc('sawtooth', f, t, end), o2 = osc('square', f, t, end); o2.detune.value = -8;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 6;
+  lp.frequency.setValueAtTime(300 + 2100 * v, t); lp.frequency.exponentialRampToValueAtTime(230, t + 0.13);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.34 * v, t + 0.004);
+  g.gain.setTargetAtTime(0.2 * v, t + 0.005, 0.05); g.gain.setTargetAtTime(0, t + dur, 0.015);
+  const m = A_gain(0.5);
+  o1.connect(lp); o2.connect(m); m.connect(lp); lp.connect(g); g.connect(AUDIO.out);
+};
+// a plucked upright for the theatre's walking line
+I.upright = (t, n, v = 1) => {
+  const ctx = AUDIO.ctx, f = mtof(n), end = t + 0.7;
+  const o1 = osc('triangle', f, t, end), o2 = osc('sine', f * 2, t, end);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(1400, t); lp.frequency.exponentialRampToValueAtTime(300, t + 0.3);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.55 * v, t + 0.006); g.gain.exponentialRampToValueAtTime(0.001, t + 0.62);
+  const m = A_gain(0.25);
+  o1.connect(lp); o2.connect(m); m.connect(lp); lp.connect(g); g.connect(AUDIO.out);
+  noiseHit(t, 0.02, 'lowpass', 900, 0.1 * v);
+};
+I.stab = (t, notes, dur, v = 1, bright = 1) => {
+  const ctx = AUDIO.ctx, end = t + dur + 0.25;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 1.5;
+  lp.frequency.setValueAtTime(1500 + 4500 * bright, t); lp.frequency.exponentialRampToValueAtTime(900, t + dur + 0.1);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.18 * v, t + 0.006);
+  g.gain.setTargetAtTime(0.105 * v, t + 0.01, dur * 0.4); g.gain.setTargetAtTime(0, t + dur, 0.03);
+  lp.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.22);
+  for (const n of notes) for (const dt of [-7, 7]) { const o = osc('sawtooth', mtof(n), t, end); o.detune.value = dt; o.connect(lp); }
+};
+I.pad = (t, notes, dur, v = 1) => {
+  const ctx = AUDIO.ctx, end = t + dur + 0.8;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; lp.Q.value = 0.7;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.05 * v, t + 0.3); g.gain.setTargetAtTime(0, t + dur, 0.2);
+  lp.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.5);
+  for (const n of notes) for (const dt of [0, 11]) { const o = osc('sawtooth', mtof(n), t, end); o.detune.value = dt; o.connect(lp); }
+};
+// FM: a DX-style electric piano / bell
+I.bell = (t, n, dur, v = 1, ratio = 1, index = 3) => {
+  const ctx = AUDIO.ctx, f = mtof(n), len = Math.max(0.5, dur * 2.5), end = t + len + 0.05;
+  const c = osc('sine', f, t, end), m = osc('sine', f * ratio, t, end);
+  const mg = ctx.createGain(); mg.gain.setValueAtTime(f * index, t); mg.gain.exponentialRampToValueAtTime(f * 0.25, t + 0.6);
+  m.connect(mg); mg.connect(c.frequency);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.36 * v, t + 0.003); g.gain.exponentialRampToValueAtTime(0.001, t + len);
+  c.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.3); send(g, AUDIO.echo, 0.5);
+};
+I.brass = (t, n, dur, v = 1) => {
+  const ctx = AUDIO.ctx, f = mtof(n), end = t + dur + 0.2;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 2.2;
+  lp.frequency.setValueAtTime(500, t); lp.frequency.exponentialRampToValueAtTime(4200, t + 0.06); lp.frequency.setTargetAtTime(2400, t + 0.07, 0.1);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.21 * v, t + 0.022); g.gain.setTargetAtTime(0.17 * v, t + 0.03, 0.1); g.gain.setTargetAtTime(0, t + dur, 0.03);
+  lp.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.2); send(g, AUDIO.echo, 0.3);
+  for (const dt of [-6, 6]) { const o = osc('sawtooth', f, t, end); o.detune.value = dt; o.connect(lp); }
+  const sub = osc('square', f / 2, t, end), sg = A_gain(0.25); sub.connect(sg); sg.connect(lp);
+};
+// a wordless, formant-filtered "voice" for when he sings
+I.voice = (t, n, dur, v = 1, vowel = 'a') => {
+  const ctx = AUDIO.ctx, f = mtof(n), end = t + dur + 0.25;
+  const o = osc('sawtooth', f, t, end), o2 = osc('sawtooth', f, t, end); o2.detune.value = 9;
+  const lfo = osc('sine', 5.4, t, end), lg = ctx.createGain();
+  lg.gain.setValueAtTime(0, t); lg.gain.linearRampToValueAtTime(16, t + Math.min(0.3, dur));
+  lfo.connect(lg); lg.connect(o.detune); lg.connect(o2.detune);
+  for (const oo of [o, o2]) { oo.frequency.setValueAtTime(f * 0.96, t); oo.frequency.exponentialRampToValueAtTime(f, t + 0.06); }
+  const mix = A_gain(0.6); o.connect(mix); o2.connect(mix);
+  // a baritone's vowels
+  const F = { a: [[730, 1], [1090, 0.5], [2440, 0.2]], o: [[570, 1], [840, 0.45], [2410, 0.12]], e: [[530, 1], [1840, 0.4], [2480, 0.18]] }[vowel];
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.7 * v, t + 0.045); g.gain.setTargetAtTime(0, t + dur, 0.05);
+  for (const [ff, gg] of F) {
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = ff; bp.Q.value = ff / 110;
+    const gn = A_gain(gg * 2.6); mix.connect(bp); bp.connect(gn); gn.connect(g);
+  }
+  g.connect(AUDIO.out); send(g, AUDIO.rev, 0.35); send(g, AUDIO.echo, 0.35);
+};
+I.piano = (t, n, dur, v = 1) => {
+  const ctx = AUDIO.ctx, f = mtof(n);
+  const g = ctx.createGain(); g.gain.value = 0.065 * v;
+  g.connect(AUDIO.out); send(g, AUDIO.rev, 0.55);
+  const amps = [1, 0.5, 0.28, 0.15, 0.08, 0.04];
+  const damp = t + dur + 0.25;
+  for (let k = 1; k <= 6; k++) {
+    const T = 2.6 / Math.pow(k, 0.75) * (n < 55 ? 1.3 : 1);
+    const end = Math.min(t + T + 0.1, damp + 0.35);
+    const o = osc('sine', f * k * (1 + 0.0004 * k * k), t, end);
+    const pg = ctx.createGain();
+    pg.gain.setValueAtTime(0, t); pg.gain.linearRampToValueAtTime(amps[k - 1], t + 0.004);
+    pg.gain.exponentialRampToValueAtTime(0.0008, t + T);
+    pg.gain.setTargetAtTime(0, damp, 0.08);
+    o.connect(pg); pg.connect(g);
+  }
+  noiseHit(t, 0.02, 'lowpass', 1800, 0.02 * v);
+};
+I.mbox = (t, n, v = 1) => {
+  const ctx = AUDIO.ctx, f = mtof(n);
+  const g = ctx.createGain(); g.gain.value = 0.17 * v; g.connect(AUDIO.out); send(g, AUDIO.rev, 0.6); send(g, AUDIO.echo, 0.25);
+  for (const [k, a, T] of [[1, 1, 1.4], [2.01, 0.3, 0.5], [5.4, 0.12, 0.12]]) {
+    const o = osc('sine', f * k, t, t + T + 0.05), pg = ctx.createGain();
+    pg.gain.setValueAtTime(0, t); pg.gain.linearRampToValueAtTime(a, t + 0.002); pg.gain.exponentialRampToValueAtTime(0.001, t + T);
+    o.connect(pg); pg.connect(g);
+  }
+};
+I.pluck = (t, n, v = 1, pan = 0) => {
+  const ctx = AUDIO.ctx, f = mtof(n), end = t + 0.25;
+  const o = osc('square', f, t, end);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(3500, t); lp.frequency.exponentialRampToValueAtTime(500, t + 0.15);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.075 * v, t + 0.003); g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+  const p = ctx.createStereoPanner(); p.pan.value = pan;
+  o.connect(lp); lp.connect(g); g.connect(p); p.connect(AUDIO.out); send(p, AUDIO.rev, 0.3);
+};
+I.goofy = (t, n, dur, v = 1) => {
+  const ctx = AUDIO.ctx, end = t + dur + 0.1;
+  const o = osc('square', mtof(n), t, end);
+  const lfo = osc('sine', 9, t, end), lg = A_gain(45); lfo.connect(lg); lg.connect(o.detune);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1700;
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.07 * v, t + 0.01); g.gain.setTargetAtTime(0, t + dur, 0.02);
+  o.connect(lp); lp.connect(g); g.connect(AUDIO.out);
+};
+// ---------------------------------------------------------------- sound effects
+I.scratch = t => {
+  const ctx = AUDIO.ctx, end = t + 0.5;
+  const s = noiseSrc(t, end);
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 4;
+  const fr = [[0, 500], [0.08, 2700], [0.16, 600], [0.27, 2300], [0.42, 280]];
+  for (const [dt, f] of fr) bp.frequency.linearRampToValueAtTime(f, t + dt);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.7, t + 0.01); g.gain.setValueAtTime(0.7, t + 0.36); g.gain.linearRampToValueAtTime(0, t + 0.46);
+  s.connect(bp); bp.connect(g); g.connect(AUDIO.out);
+  const o = osc('sawtooth', 150, t, end);
+  for (const [dt, f] of fr) o.frequency.linearRampToValueAtTime(f * 0.3, t + dt);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1800;
+  const g2 = ctx.createGain(); g2.gain.setValueAtTime(0, t); g2.gain.linearRampToValueAtTime(0.12, t + 0.01); g2.gain.setValueAtTime(0.12, t + 0.36); g2.gain.linearRampToValueAtTime(0, t + 0.46);
+  o.connect(lp); lp.connect(g2); g2.connect(AUDIO.out);
+};
+I.bloop = (t, f0 = 500, v = 1) => {
+  const o = osc('sine', f0, t, t + 0.12);
+  o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f0 * 2.6, t + 0.07);
+  const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.16 * v, t + 0.006); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+  o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.4);
+};
+I.blip = (t, n) => {
+  const o = osc('square', mtof(n), t, t + 0.07);
+  const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0.06, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+  o.connect(g); g.connect(AUDIO.out);
+};
+I.ding = (t, n = 96, v = 1) => I.bell(t, n, 0.5, 0.8 * v, 3.5, 2.2);
+I.whoosh = (t, dur = 0.5, v = 1, pan = 0) => {
+  const ctx = AUDIO.ctx, end = t + dur + 0.05;
+  const s = noiseSrc(t, end);
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.3;
+  bp.frequency.setValueAtTime(300, t); bp.frequency.exponentialRampToValueAtTime(2600, t + dur * 0.55); bp.frequency.exponentialRampToValueAtTime(500, t + dur);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.42 * v, t + dur * 0.55); g.gain.linearRampToValueAtTime(0, t + dur);
+  const p = ctx.createStereoPanner(); p.pan.setValueAtTime(-pan, t); p.pan.linearRampToValueAtTime(pan, t + dur);
+  s.connect(bp); bp.connect(g); g.connect(p); p.connect(AUDIO.out); send(p, AUDIO.rev, 0.2);
+};
+I.riser = (t, dur, v = 1) => {
+  const ctx = AUDIO.ctx, end = t + dur + 0.05;
+  const s = noiseSrc(t, end);
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.setValueAtTime(300, t); hp.frequency.exponentialRampToValueAtTime(7000, t + dur);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.28 * v, t + dur); g.gain.linearRampToValueAtTime(0, t + dur + 0.03);
+  s.connect(hp); hp.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.3);
+  const o = osc('sawtooth', 110, t, end); o.frequency.exponentialRampToValueAtTime(880, t + dur);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2400;
+  const g2 = ctx.createGain(); g2.gain.setValueAtTime(0, t); g2.gain.linearRampToValueAtTime(0.05 * v, t + dur); g2.gain.linearRampToValueAtTime(0, t + dur + 0.03);
+  o.connect(lp); lp.connect(g2); g2.connect(AUDIO.out);
+};
+I.splash = (t, v = 1) => {
+  noiseHit(t, 0.75, 'lowpass', 2800, 0.6 * v, 0.7, 0.3);
+  const n = noiseHit(t + 0.02, 0.4, 'bandpass', 1200, 0.4 * v, 0.9, 0.2);
+  n.f.frequency.exponentialRampToValueAtTime(400, t + 0.4);
+};
+I.clunk = t => {
+  const o = osc('sine', 80, t, t + 0.4);
+  o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(55, t + 0.2);
+  const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0.9, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+  o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.7);
+  noiseHit(t, 0.03, 'highpass', 1500, 0.5, 0.7, 0.5);
+};
+I.shutter = t => { noiseHit(t, 0.018, 'highpass', 3000, 0.45); noiseHit(t + 0.055, 0.024, 'highpass', 2400, 0.35); };
+I.swish = (t, dur = 1.2, v = 1) => {
+  const ctx = AUDIO.ctx, s = noiseSrc(t, t + dur + 0.05);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(400, t); lp.frequency.linearRampToValueAtTime(1100, t + dur * 0.4); lp.frequency.linearRampToValueAtTime(300, t + dur);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.5 * v, t + dur * 0.3); g.gain.linearRampToValueAtTime(0, t + dur);
+  s.connect(lp); lp.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.2);
+};
+I.brush = (t, v = 1) => {
+  const n = noiseHit(t, 0.35, 'bandpass', 3000, 0.25 * v, 0.8, 0.2);
+  n.f.frequency.exponentialRampToValueAtTime(1200, t + 0.3);
+};
+I.slide = (t, n0, n1, dur, v = 1) => {
+  const ctx = AUDIO.ctx, end = t + dur + 0.1;
+  const o = osc('sine', mtof(n0), t, end); o.frequency.exponentialRampToValueAtTime(mtof(n1), t + dur);
+  const lfo = osc('sine', 6, t, end), lg = A_gain(25); lfo.connect(lg); lg.connect(o.detune);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.16 * v, t + 0.03); g.gain.setTargetAtTime(0, t + dur, 0.03);
+  o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.25);
+};
+I.cricket = t => {
+  for (let k = 0; k < 3; k++) {
+    const t1 = t + k * 0.075;
+    const o = osc('sine', 4300, t1, t1 + 0.06);
+    const am = osc('square', 42, t1, t1 + 0.06), ag = A_gain(0.5);
+    const g = AUDIO.ctx.createGain(); g.gain.setValueAtTime(0, t1); g.gain.linearRampToValueAtTime(0.05, t1 + 0.01); g.gain.linearRampToValueAtTime(0, t1 + 0.055);
+    am.connect(ag); ag.connect(g.gain);
+    o.connect(g); g.connect(AUDIO.out); send(g, AUDIO.rev, 0.4);
+  }
+};
+I.applause = (t, dur, v = 1) => {
+  const r = mulberry(Math.floor(t * 1000));
+  const n = Math.floor(dur * 9);
+  for (let i = 0; i < n; i++) {
+    const tt = t + r() * dur;
+    const fade = 1 - (tt - t) / dur;
+    noiseHit(tt, 0.05, 'bandpass', 900 + r() * 1400, 0.22 * v * fade, 1.2, 0.3, 0, (r() - 0.5) * 1.2);
+  }
+};
+
+// ---------------------------------------------------------------- the score
+const SCORE = [];
+const VOICE = [];     // [start, end] of every sung note (kept for the mouth follower; unused in this piece)
+const ev = (beat, fn, ...a) => SCORE.push({ t: beat * BEAT, fn, a });
+// chords: r = bass root, s = stab voicing, arp = sparkle notes, third = 3 (minor) or 4 (major) for the bass line
+const CHD = {
+  Gm: { r: 31, s: [55, 58, 62, 67], arp: [67, 70, 74, 79], third: 3 },
+  Eb: { r: 39, s: [55, 58, 63, 67], arp: [67, 70, 75, 79], third: 4 },
+  F: { r: 41, s: [57, 60, 65, 69], arp: [69, 72, 77, 81], third: 4 },
+  Cm: { r: 36, s: [55, 60, 63, 67], arp: [67, 72, 75, 79], third: 3 },
+  D7: { r: 38, s: [57, 60, 66, 69], arp: [69, 72, 78, 81], third: 4 }
+};
+// the riff: root, third, fifth, fourth in a syncopated figure [beat, semitones above root, length, velocity]
+const RIFF = [[0, 0, 0.4, 1], [0.75, 0, 0.2, 0.7], [1.5, 'T', 0.3, 0.8], [2, 0, 0.4, 0.9], [2.5, 7, 0.3, 0.8], [3, 5, 0.3, 0.8], [3.5, 7, 0.4, 0.9]];
+function riff(bar, ch, v) {
+  for (const [bt, iv, len, vel] of RIFF) ev(bar * 4 + bt, I.bass, ch.r + (iv === 'T' ? ch.third : iv), BEAT * len, vel * (v || 1));
+}
+// off-beat comping: short stabs on the "ands"
+const COMP = [[0.5, 0.3, 0.9], [1.5, 0.3, 0.8], [2.5, 0.3, 0.9], [3.25, 0.18, 0.7], [3.75, 0.18, 0.7]];
+function comp(bar, ch, v) { for (const [bt, d, vv] of COMP) ev(bar * 4 + bt, I.stab, ch.s, d * BEAT, vv * (v || 1)); }
+function drums(bar, o) {
+  const b0 = bar * 4;
+  for (let q = 0; q < 4; q++) {
+    ev(b0 + q, I.kick, (o.kick === undefined ? 1 : o.kick));
+    if (q % 2 === 1 && !o.noSnare) { ev(b0 + q, I.snare, 0.9); if (o.clap) ev(b0 + q, I.clap, 0.6); }
+    ev(b0 + q + 0.5, I.hat, 0.8, q === 3 && !!o.open);
+    if (!o.light) { ev(b0 + q + 0.25, I.hat, 0.28); ev(b0 + q + 0.75, I.hat, 0.4); }
+  }
+}
+function tune(bar, notes, inst, tr, v, extra) { for (const [bt, n, d] of notes) ev(bar * 4 + bt, inst, n + (tr || 0), d * BEAT, v || 1, ...(extra || [])); }
+function arpeggio(bar, ch, v) {
+  for (let i = 0; i < 16; i++) ev(bar * 4 + i * 0.25, I.pluck, ch.arp[i % 4] + (i % 8 >= 4 ? 12 : 0), (v || 1) * (i % 4 === 0 ? 1 : 0.7), i % 2 ? 0.45 : -0.45);
+}
+// the two-bar bell motif over Gm / Eb
+const M_GM = [[0, 79, 0.75], [0.75, 77, 0.25], [1, 74, 0.5], [1.5, 70, 0.5], [2, 74, 0.75], [2.75, 77, 0.25], [3, 79, 1]];
+const M_EB = [[0, 75, 0.75], [0.75, 74, 0.25], [1, 70, 0.5], [1.5, 67, 0.5], [2, 70, 0.75], [2.75, 74, 0.25], [3, 75, 1]];
+const M_CM = [[0, 79, 0.75], [0.75, 75, 0.25], [1, 72, 0.5], [1.5, 75, 0.5], [2, 79, 0.75], [2.75, 84, 0.25], [3, 82, 1]];
+const M_D7 = [[0, 81, 0.5], [0.5, 78, 0.5], [1, 74, 0.5], [1.5, 72, 0.5], [2, 69, 0.5], [2.5, 72, 0.5], [3, 74, 0.5], [3.5, 78, 0.5]];
+
+function buildScore() {
+  // ---- bars 0-1 (beats 0-8): the room. A low pad, a heartbeat, smoke, the odd finger-snap and a glass.
+  ev(0, I.brush, 3.6);
+  ev(0, I.pad, CHD.Gm.s, BEAT * 8, 0.9);
+  for (const bt of [0, 4]) ev(bt, I.upright, 31, 0.9);
+  for (const bt of [2.5, 6.5]) ev(bt, I.upright, 34, 0.55);
+  for (const bt of [2, 3, 6, 7]) ev(bt, I.snap, 0.55);
+  [4, 5, 6, 7].forEach((bt, i) => ev(bt, I.kick, 0.3 + i * 0.06));
+  for (let i = 0; i < 8; i++) ev(i + 0.5, I.hat, 0.16 + i * 0.015);
+  ev(1.2, I.ding, 103, 0.45); ev(5.3, I.ding, 98, 0.4);             // a glass somewhere
+  ev(6.15, I.swish, 0.5, 0.6); ev(6.9, I.ding, 96, 0.7);            // the brim, and the glint on it
+
+  // ---- bars 2-3 (8-16): the walk. The groove wakes up: a footfall on every beat, the riff, thin stabs.
+  const walk = [['Gm', 2], ['Eb', 3]];
+  for (const [nm, bar] of walk) {
+    const ch = CHD[nm];
+    for (let q = 0; q < 4; q++) { ev(bar * 4 + q, I.kick, 0.85); if (q % 2) ev(bar * 4 + q, I.snap, 0.9); ev(bar * 4 + q + 0.5, I.hat, 0.6); }
+    riff(bar, ch, 0.9);
+    ev(bar * 4, I.pad, ch.s, BEAT * 4, 0.8);
+    if (bar === 3) comp(bar, ch, 0.7);
+  }
+  ev(12, I.upright, 39, 0.8);
+  // the lead-in: D7 stabs and a snare build into the spotlight
+  ev(14, I.stab, CHD.D7.s, BEAT * 0.4, 0.9); ev(14.5, I.stab, CHD.D7.s, BEAT * 0.3, 0.8); ev(15, I.stab, CHD.D7.s, BEAT * 0.3, 0.9);
+  for (let i = 0; i < 8; i++) ev(14 + i * 0.25, I.snare, 0.22 + i * 0.09);
+  ev(14, I.riser, BEAT * 2, 0.8);
+  ev(13.5, I.bell, 91, 0.6, 0.6, 2.5, 1);
+
+  // ---- bars 4-5 (16-24): in the light. Full groove, brass on the "ands", the bell motif.
+  ev(16, I.crash, 1.0);
+  ev(16, I.timp, 43, 1.0);
+  const sp = [['Gm', 4], ['Eb', 5]];
+  for (const [nm, bar] of sp) {
+    const ch = CHD[nm];
+    drums(bar, { clap: bar === 5, open: true });
+    riff(bar, ch, 1.0); comp(bar, ch, 1.0);
+    ev(bar * 4, I.pad, ch.s, BEAT * 4, 0.85);
+  }
+  tune(4, M_GM, I.bell, 0, 1, [1, 3]); tune(5, M_EB, I.bell, 0, 1, [1, 3]);
+  tune(4, M_GM, I.brass, -12, 0.55); tune(5, M_EB, I.brass, -12, 0.55);
+  ev(20.3, I.whoosh, 0.7, 0.7, 0.6);            // the spin
+  ev(22.3, I.ding, 100, 0.7);                   // up on the toes
+
+  // ---- bars 6-7 (24-32): the line marches in, then glides. Cm and D7, pluck arpeggios, thicker brass.
+  const gl = [['Cm', 6], ['D7', 7]];
+  for (const [nm, bar] of gl) {
+    const ch = CHD[nm];
+    drums(bar, { clap: true, open: true });
+    riff(bar, ch, 1.0); comp(bar, ch, 1.0); arpeggio(bar, ch, 0.8);
+    ev(bar * 4, I.pad, ch.s, BEAT * 4, 0.9);
+  }
+  tune(6, M_CM, I.bell, 0, 1, [1, 3]); tune(7, M_D7, I.bell, 0, 1, [1, 3]);
+  tune(6, M_CM, I.brass, -12, 0.65); tune(7, M_D7, I.brass, -12, 0.65);
+  ev(31, I.riser, BEAT * 1.0, 0.7);
+  for (let i = 0; i < 4; i++) ev(31 + i * 0.25, I.snare, 0.3 + i * 0.15);
+
+  // ---- bars 8-9 (32-40): the hits. Brass and snare land on the even beats, exactly with the flung arms.
+  ev(32, I.crash, 1.0); ev(32, I.timp, 43, 1.0);
+  const ht = [['Gm', 8, 32], ['Eb', 8, 34], ['F', 9, 36], ['D7', 9, 38]];
+  for (const [nm, bar, bt] of ht) {
+    const ch = CHD[nm];
+    ev(bt, I.brass, ch.s[3] + 12, BEAT * 0.5, 1.15); ev(bt, I.brass, ch.s[1] + 12, BEAT * 0.5, 0.9); ev(bt, I.stab, ch.s, BEAT * 0.45, 1.2);
+    ev(bt, I.snare, 1.0); ev(bt, I.clap, 0.8); ev(bt, I.kick, 1.0);
+    ev(bt + 1, I.kick, 0.9); ev(bt + 0.5, I.hat, 0.9, true); ev(bt + 1.5, I.hat, 0.7);
+    for (let i = 0; i < 8; i++) ev(bt + i * 0.25, I.bass, ch.r + (i % 2 ? 12 : 0), BEAT * 0.2, i % 4 === 0 ? 1 : 0.7);
+    ev(bt, I.pad, ch.s, BEAT * 2, 0.8);
+  }
+  ev(36, I.crash, 0.7);
+  ev(35.3, I.whoosh, 0.8, 0.8, -0.6);            // the spin winds up
+  for (let i = 0; i < 6; i++) ev(39 + i * 0.16, I.tom, [55, 52, 50, 47, 45, 43][i], 0.8);
+
+  // ---- bars 10-11 (40-48): the feet. The band thins to snaps and taps; an upright walks underneath.
+  ev(40, I.crash, 0.6);
+  const up = [31, 34, 36, 38, 39, 38, 36, 34];
+  for (let i = 0; i < 8; i++) ev(40 + i, I.upright, up[i], 0.95);
+  for (let i = 0; i < 16; i++) {
+    ev(40.5 + i * 0.5, i % 2 ? I.snap : I.hat, i % 2 ? 0.8 : 0.5);      // taps on the eighth notes, left then right
+    if (i % 4 === 0) ev(40.5 + i * 0.5 + 0.25, I.hat, 0.35);
+  }
+  for (let q = 0; q < 8; q++) ev(40 + q, I.kick, 0.55);
+  ev(40, I.pad, CHD.Gm.s, BEAT * 4, 0.6); ev(44, I.pad, CHD.Cm.s, BEAT * 4, 0.6);
+  for (const [bt, n] of [[41, 79], [43, 77], [45, 75], [47, 74]]) ev(bt + 0.5, I.piano, n, BEAT * 0.8, 0.7);
+  ev(46, I.riser, BEAT * 2, 0.6);
+  for (let i = 0; i < 6; i++) ev(46 + i * 0.33, I.snap, 0.5 + i * 0.1);
+
+  // ---- bar 12 (48-50): everything stops. One low hit as he drops, then a held chord and a heartbeat.
+  ev(47.9, I.timp, 38, 1.1); ev(47.9, I.tom, 36, 1.0);
+  ev(48.4, I.pad, [50, 55, 58, 62, 65], BEAT * 3.4, 1.0);
+  [48.5, 49, 49.5].forEach((bt, i) => ev(bt, I.kick, 0.45 + i * 0.12));
+  ev(49.6, I.swish, 0.9, 0.6);
+
+  // ---- bar 12-13 (50-53.6): the lean. A sustained brass chord swells; bells shiver; a low pedal underneath.
+  ev(50, I.timp, 31, 1.2); ev(50, I.crash, 0.55);
+  for (const n of [55, 58, 62, 67, 70]) ev(50, I.brass, n, BEAT * 3.1, 0.55);
+  ev(50, I.pad, [43, 50, 55, 58, 62], BEAT * 4, 1.0);
+  ev(50, I.whoosh, 1.4, 0.7, 0.3);
+  for (let i = 0; i < 12; i++) ev(50.9 + i * 0.25, I.bell, 91 + (i % 4) * 3 + (i > 7 ? 5 : 0), 0.3, 0.35 + i * 0.04, 3.5, 1.5);
+  for (const bt of [51, 52, 53]) ev(bt, I.kick, 0.5);
+  ev(52, I.riser, BEAT * 1.6, 0.9);
+  // he snaps back up: a snare roll, and the whole band lands on the hat tip
+  for (let i = 0; i < 8; i++) ev(53.0 + i * 0.075, I.snare, 0.3 + i * 0.09);
+  ev(53.6, I.crash, 1.2); ev(53.6, I.kick, 1.1); ev(53.6, I.timp, 31, 1.2); ev(53.6, I.clap, 0.9);
+  ev(53.6, I.stab, [43, 55, 58, 62, 67, 70], BEAT * 1.6, 1.3);
+  ev(53.6, I.brass, 79, BEAT * 1.6, 1.15); ev(53.6, I.brass, 74, BEAT * 1.6, 0.9);
+  ev(53.6, I.bass, 31, BEAT * 1.6, 1.1);
+  // the tail: a glint on the brim, one snap, and the room breathing out
+  ev(54.4, I.ding, 103, 0.9); ev(54.9, I.ding, 98, 0.6); ev(55.2, I.snap, 0.9);
+  ev(53.6, I.pad, [55, 58, 62, 67, 70], BEAT * 2.4, 1.1);
+
+  SCORE.sort((a, b) => a.t - b.t);
+}
+buildScore();
+
+// Beat-accurate hit lists for the picture: lights, stars and camera answer the drums.
+const HITS = { kick: [], snare: [], hat: [], crash: [], clap: [], pluck: [], snap: [] };
+for (const e of SCORE) {
+  const k = e.fn === I.kick ? 'kick' : e.fn === I.snare ? 'snare' : e.fn === I.hat ? 'hat' : e.fn === I.crash ? 'crash' : e.fn === I.clap ? 'clap' : e.fn === I.pluck ? 'pluck' : e.fn === I.snap ? 'snap' : null;
+  const v = k === 'pluck' ? e.a[1] : e.a[0];     // (a pluck's first argument is its note)
+  if (k) HITS[k].push([e.t, typeof v === 'number' ? v : 1]);
+}
+// every hit of a kind in the last `span` seconds: [[age, strength, index], ...]
+function recentHits(kind, t, span) {
+  const L = HITS[kind], out = [];
+  let lo = 0, hi = L.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (L[m][0] <= t + 1e-4) { k = m; lo = m + 1; } else hi = m - 1; }
+  for (let i = k; i >= 0 && t - L[i][0] < span; i--) out.push([t - L[i][0], L[i][1], i]);
+  return out;
+}
+// strength of the most recent hit of a kind, decaying with time constant `decay` (s)
+function hitPulse(kind, t, decay) {
+  const L = HITS[kind];
+  let lo = 0, hi = L.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (L[m][0] <= t + 1e-4) { k = m; lo = m + 1; } else hi = m - 1; }
+  if (k < 0) return 0;
+  return L[k][1] * Math.exp(-(t - L[k][0]) / decay);
+}
+
+// his mouth, following whatever he is singing
+function voiceMouth(t) {
+  for (const [a, e] of VOICE) {
+    if (t >= a - 0.03 && t <= e + 0.08) {
+      const k = smoothstep(a - 0.03, a + 0.04, t) * (1 - smoothstep(e - 0.02, e + 0.08, t));
+      const syl = 0.62 + 0.38 * Math.abs(Math.sin(Math.PI * (t - a) / (BEAT * 0.5)));
+      return 0.18 + 0.72 * k * syl;
+    }
+  }
+  return 0.12;
+}
+
+// ---------------------------------------------------------------- transport
+// Piece time t is ctxTime - t0. Events are scheduled a quarter of a second ahead.
+function audioStart(pieceNow) {
+  if (!AUDIO.ctx && !audioSetup()) return false;
+  const ctx = AUDIO.ctx;
+  if (ctx.state === 'suspended') ctx.resume();
+  audioAnchor(pieceNow);
+  AUDIO.running = true;
+  audioPump();
+  return true;
+}
+// line the score up so that piece time `pieceNow` is heard now; skip anything already past
+function audioAnchor(pieceNow) {
+  const ctx = AUDIO.ctx;
+  AUDIO.t0 = ctx.currentTime - pieceNow;
+  const tp = pieceNow < 0 ? pieceNow : modT(pieceNow);
+  AUDIO.loop = pieceNow < 0 ? 0 : Math.floor(pieceNow / DUR);
+  let i = 0;
+  while (i < SCORE.length && SCORE[i].t < tp - 1e-6) i++;
+  if (i >= SCORE.length) { i = 0; AUDIO.loop++; }
+  AUDIO.idx = i;
+}
+function audioPump() {
+  if (!AUDIO.running) return;
+  const ctx = AUDIO.ctx, now = ctx.currentTime, horizon = now + 0.25;
+  for (let guard = 0; guard < 4000; guard++) {
+    const e = SCORE[AUDIO.idx];
+    const when = AUDIO.t0 + AUDIO.loop * DUR + e.t;
+    if (when > horizon) break;
+    if (when > now - 0.03) { try { e.fn(Math.max(when, now), ...e.a); } catch (err) { /* keep the band playing */ } }
+    AUDIO.idx++;
+    if (AUDIO.idx >= SCORE.length) { AUDIO.idx = 0; AUDIO.loop++; }
+  }
+}
+function audioPieceTime() {
+  const ctx = AUDIO.ctx;
+  let ct = ctx.currentTime;
+  if (ctx.getOutputTimestamp) {
+    const ts = ctx.getOutputTimestamp();
+    if (ts && ts.contextTime > 0) ct = ts.contextTime + Math.max(0, (performance.now() - ts.performanceTime) / 1000);
+  }
+  return ct - AUDIO.t0;
+}
+function audioMute(m) {
+  if (!AUDIO.ctx) return;
+  AUDIO.muted = m;
+  AUDIO.master.gain.setTargetAtTime(m ? 0 : 0.8, AUDIO.ctx.currentTime, 0.05);
+}
+setInterval(audioPump, 50);
+
+// ---- 90-main.js
+// ============================================================
+// Frame orchestration, clock, input and the test hooks
+// ============================================================
+const bufBGd = new StrokeBuf(), bufSH = new StrokeBuf(), bufFG = new StrokeBuf();
+let setsBuilt = false;
+const STATS = { frames: 0, lastMs: 0, strokes: 0, verts: 0 };
+const DARKGROUND = [0.03, 0.025, 0.04];
+const NOPOOL = [-1e5, -1e5, 1, 1];
+const pieceT = T => modT(T);
+
+// flashes on the big hits: [beat, colour, strength, decay per beat]
+const FLASHES = [[16, [1.0, 0.85, 0.6], 0.3, 6], [32, [1, 0.95, 0.85], 0.22, 7], [36, [1, 0.95, 0.85], 0.2, 7], [50, [0.8, 0.9, 1], 0.25, 5]];
+function flashAt(b) {
+  let best = [0, 0, 0, 0];
+  for (const [b0, c, k, d] of FLASHES) {
+    if (b < b0 || b > b0 + 2) continue;
+    const a = k * Math.exp(-(b - b0) * d);
+    if (a > best[3]) best = [c[0], c[1], c[2], a];
+  }
+  return best;
+}
+function baseComposite(o) {
+  return Object.assign({
+    amb: [1, 1, 1], wCol: [0, 0, 0], cCol: [0, 0, 0], ground: DARKGROUND,
+    wPool: NOPOOL, wPool2: NOPOOL, cPool: NOPOOL, cPool2: NOPOOL,
+    grain: 0, relief: 2.1, floorY: -1, time: 0, refl: 0, waterY: -1,
+    pop: 0, grid: 1, popSeed: 0, gal: 0, frame: [0, 0, 1, 1],
+    galAmb: [0.5, 0.45, 0.42], galWarm: [0, 0, 0], galPool: NOPOOL,
+    flash: [0, 0, 0, 0], fade: 0, vig: 0.9
+  }, o);
+}
+
+function renderFrame(tp) {
+  const t0ms = performance.now();
+  glResize();
+  if (!setsBuilt) { buildSets(); setsBuilt = true; }
+  const t = pieceT(tp), b = t / BEAT;
+  G.t = t; G.b = b;
+  const cast = castAt(t);
+  const lead = cast[0].J;
+  const cam = cameraAt(t);
+  const Ls = lightsFor(b);
+  G.cam = cam; G.tint = LOOK.tint; G.rimW = LOOK.rimW; G.rimC = LOOK.rimC; G.pop = false; G.wI = Ls.wI; G.cI = Ls.cI;
+  const camProj = p => project(cam, p);
+
+  // ---- moving atmosphere on top of the static room
+  G.mode = 'paint'; G.layer = 'bg'; G.mid = 0;
+  G.buf = bufBGd; bufBGd.reset(); G.proj = camProj; G.boil = Math.floor(t * 6); G.jit = 0.5; G.rev = null;
+  drawSmoke(t, b, cam, lead);
+
+  // ---- floor shadows from the follow-spot
+  G.buf = bufSH; bufSH.reset(); G.mode = 'mask'; G.layer = 'sh'; G.rev = null; G.boil = Math.floor(t * 12);
+  if (spotOn(b) > 0.05) {
+    for (const c of cast) {
+      G.maskCol = [1, 0, 0]; G.proj = p => projectShadow(cam, Ls.w, p, 0);
+      drawSilSuit(c.J);
+    }
+  }
+
+  // ---- the people, far to near
+  G.buf = bufFG; bufFG.reset(); G.mode = 'paint'; G.layer = 'fg'; G.proj = camProj;
+  G.boil = Math.floor(t * 12); G.jit = REDUCED ? 0.35 : 0.7; G.rev = null;
+  const order = cast.slice().sort((p, q) => p.J.pelvis.z - q.J.pelvis.z);
+  for (const c of order) {
+    const J = c.J;
+    G.wDir = vnorm(V(Ls.w.x - J.chest.x, Math.max(60, Ls.w.y - J.chest.y), Ls.w.z - J.chest.z));
+    G.cDir = vnorm(V(Ls.c.x - J.chest.x, Math.max(30, Ls.c.y - J.chest.y), Ls.c.z - J.chest.z));
+    drawSuit(J, c.style);
+  }
+  G.mid = 0;
+
+  // ---- GPU passes
+  const vp = camVP(cam), boilBG = Math.floor(t * (REDUCED ? 2 : 6));
+  glDrawStrokes(SET.club, T_BG, { world: true, vp, boil: boilBG, jit: 0.6, tIn: 1e4, tOut: -1e4 });
+  glDrawStrokes(bufBGd, T_BG, { noClear: true, tIn: t, tOut: t });
+  glDrawStrokes(bufSH, T_SH, { mask: true, tIn: t, tOut: t });
+  glDrawStrokes(bufFG, T_FG, { tIn: t, tOut: t });
+
+  // ---- composite: a dim warm room, a cool wash from the windows, one hard warm pool where he stands
+  const U = baseComposite({ time: t, grain: (Math.floor(t * 12) % 61) * 1.37, flash: flashAt(b), relief: 2.3, vig: 0.95 });
+  const on = spotOn(b);
+  const [lx, lz] = leadXZ(b - 0.25);
+  const spotR = 1 - 0.22 * smoothstep(49.6, 50.6, b);           // the iris closes a little for the lean
+  const pulse = 0.5 + 0.5 * hitPulse('kick', t, 0.18);
+  Object.assign(U, {
+    amb: [0.36, 0.26, 0.25],
+    wCol: scalec([1.55, 1.16, 0.78], on), cCol: [0.30 + 0.05 * pulse, 0.56 + 0.05 * pulse, 1.0],
+    wPool: poolAt(cam, V(lx, 0, lz + 6), 165 * spotR, 52 * spotR),
+    wPool2: poolAt(cam, V(lx, 105, WALL_Z + 6), 120 * spotR, 190 * spotR),
+    cPool: poolAt(cam, V(-60, 200, WALL_Z), 560, 230),
+    cPool2: poolAt(cam, V(120, 0, -40), 340, 62),
+    refl: 0.42,
+    floorY: CH - project(cam, V(lx, 0, lz + 2)).y
+  });
+  // fade up from black, and down to black at the very end
+  U.fade = Math.max(1 - smoothstep(0, 1.1, t), smoothstep(DUR - 0.9, DUR - 0.05, t));
+  // a breath of exposure on the backbeat
+  const sn = Math.max(hitPulse('snare', t, 0.09), hitPulse('clap', t, 0.09));
+  if (0.03 * sn > U.flash[3]) U.flash = [1, 0.94, 0.86, 0.03 * sn];
+  glComposite(U);
+  STATS.frames++;
+  STATS.lastMs = performance.now() - t0ms;
+  STATS.strokes = bufBGd.count + bufSH.count + bufFG.count + SET.club.count;
+  STATS.verts = bufBGd.nv + bufSH.nv + bufFG.nv + SET.club.nv;
+}
+
+// ============================================================
+// Clock, input, hooks
+// ============================================================
+const QS = new URLSearchParams(location.search);
+const FIXED_T = QS.has('t') ? parseFloat(QS.get('t')) : null;
+let mode = QS.has('autoplay') ? 'play' : 'ready';
+let startMs = mode === 'play' ? performance.now() : null;
+let errors = 0, paused = false, pausedAt = 0;
+
+function start() {
+  if (mode !== 'ready') { if (AUDIO.ctx && AUDIO.ctx.state === 'suspended') AUDIO.ctx.resume(); return; }
+  mode = 'play';
+  startMs = performance.now();
+  try { audioStart(0); } catch (e) { console.warn('audio unavailable', e); AUDIO.running = false; }
+}
+cv.addEventListener('pointerdown', start);
+cv.addEventListener('dblclick', () => {
+  const d = document;
+  if (d.fullscreenElement) d.exitFullscreen && d.exitFullscreen();
+  else if (d.documentElement.requestFullscreen) d.documentElement.requestFullscreen().catch(() => {});
+});
+window.addEventListener('keydown', e => {
+  if (e.key === 'm' || e.key === 'M') audioMute(!AUDIO.muted);
+  else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); start(); }
+});
+
+// Picture time follows the audio clock while the music is playing; otherwise the page clock.
+let audioWasRunning = false;
+function nowPieceTime(now) {
+  const tPerf = (now - startMs) / 1000;
+  const running = AUDIO.running && AUDIO.ctx && AUDIO.ctx.state === 'running';
+  if (running && !audioWasRunning && Math.abs(audioPieceTime() - tPerf) > 0.08) audioAnchor(tPerf);
+  audioWasRunning = running;
+  if (!running) return tPerf;
+  const ta = audioPieceTime();
+  startMs = now - ta * 1000;
+  return ta;
+}
+function tick(now) {
+  if (paused) return;
+  try {
+    if (mode === 'ready') renderFrame(0);
+    else { audioPump(); renderFrame(nowPieceTime(now)); }
+  } catch (e) { if (errors++ < 3) console.error(e); }
+  requestAnimationFrame(tick);
+}
+window.__rick = {
+  render: t => { renderFrame(t); return STATS; },
+  stats: () => STATS,
+  pause: () => { if (!paused) { paused = true; pausedAt = performance.now(); } },
+  resume: () => { if (paused) { paused = false; if (startMs !== null) startMs += performance.now() - pausedAt; requestAnimationFrame(tick); } },
+  score: () => SCORE.length,
+  audioWav: (sr, peakDb) => audioRenderWav(sr, peakDb),
+  audio: async (b0, b1, only) => { const r = await audioMeasure(b0, b1, only); window.__mix = r.buf; delete r.buf; return r; },
+  // debug contact sheet: render piece times into a grid over the page
+  sheet: (times, cols, scale) => {
+    cols = cols || 4; scale = scale || 0.25;
+    const w = Math.round(CW * scale), h = Math.round(CH * scale), rows = Math.ceil(times.length / cols);
+    let c = document.getElementById('__sheet');
+    if (!c) { c = document.createElement('canvas'); c.id = '__sheet'; c.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#111;z-index:9'; document.body.appendChild(c); }
+    c.width = w * cols; c.height = h * rows;
+    const x = c.getContext('2d');
+    x.font = `${Math.round(h * 0.07)}px sans-serif`;
+    times.forEach((t, i) => {
+      renderFrame(t);
+      x.drawImage(cv, (i % cols) * w, Math.floor(i / cols) * h, w, h);
+      x.fillStyle = '#ff0'; x.fillText(`t=${t.toFixed(2)}  b=${(t / BEAT).toFixed(1)}`, (i % cols) * w + 6, Math.floor(i / cols) * h + h * 0.09);
+    });
+    return times.length;
+  },
+  unsheet: () => { const c = document.getElementById('__sheet'); if (c) c.remove(); },
+  zoom: (t, fx0, fy0, fx1, fy1) => {
+    renderFrame(t);
+    let c = document.getElementById('__sheet');
+    if (!c) { c = document.createElement('canvas'); c.id = '__sheet'; c.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#111;z-index:9'; document.body.appendChild(c); }
+    const sx = fx0 * CW, sy = fy0 * CH, sw = (fx1 - fx0) * CW, sh = (fy1 - fy0) * CH;
+    c.width = Math.round(sw); c.height = Math.round(sh);
+    c.getContext('2d').drawImage(cv, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    return [c.width, c.height];
+  }
+};
+if (FIXED_T !== null && isFinite(FIXED_T)) { mode = 'fixed'; renderFrame(FIXED_T); }
+else requestAnimationFrame(tick);
+
+</script>
+</body>
+</html>
