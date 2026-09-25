@@ -85,7 +85,7 @@ Dependências no ambiente: `pip install playwright==1.56.0 imageio-ffmpeg pillow
 ## Como assistir, gravar e renderizar
 
 - **Assistir / gravar a tela:** abra `index.html` no Chrome (funciona direto do disco; a narração está
-  embutida). Espere o botão amarelo (o som é pré-mixado em ~5 s), clique e grave. Espaço/Enter reinicia,
+  embutida). Espere o botão amarelo (o som é pré-mixado em alguns segundos), clique e grave. Espaço/Enter reinicia,
   F ou duplo clique = tela cheia, M = mudo; o cursor some durante a reprodução e o último quadro fica
   parado no fim. Ao vivo não há motion blur de sub-quadros; se a máquina engasgar, o áudio segue certo e
   a imagem acompanha o relógio do áudio.
