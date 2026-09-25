@@ -1,10 +1,18 @@
-# Ranking dos Políticos: "Escolha com critério" (15 s, 9:16)
+# Ranking dos Políticos: "Escolha com critério" (45 s, 9:16)
 
-Peça vertical de motion graphics (1080x1920, 15 s, com trilha) que chama o público para consultar o
+Peça vertical de motion graphics (1080x1920, 45 s, com trilha) que chama o público para consultar o
 [Ranking dos Políticos](https://ranking.org.br) antes de votar. Tudo é feito em código: formas, tipografia
 cinética, transições, pós-processamento e a trilha (sintetizada em WebAudio, sem samples). Fonte: Poppins.
 
-## Roteiro (8 compassos de 4/4 a 128 BPM = exatamente 15,0 s)
+## Tempo
+
+A edição foi desenhada em 32 "tempos de história" (a versão curta de 15 s). A versão de 45 s toca a mesma
+história num relógio mais lento: `REMAP` em `src/00-core.js` liga cada tempo de saída (24 compassos a 128 BPM =
+45,0 s) a um tempo de história por uma curva monotônica suave. As animações rodam a 30-60% da velocidade e cada
+momento-chave segura (quase parado, sem congelar) o suficiente para ser lido; os cortes caem nas barras da música.
+Para voltar aos 15 s, basta `REMAP = [[0, 0], [32, 32]]`.
+
+## Roteiro (tempos da versão de 15 s; na de 45 s cada bloco dura cerca de 3x)
 
 | tempo | tela | ideia de motion |
 |---|---|---|

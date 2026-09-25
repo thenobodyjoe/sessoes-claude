@@ -8,7 +8,6 @@
 // ============================================================
 const mtof = n => 440 * Math.pow(2, (n - 69) / 12);
 const SCORE = [];
-const ev = (b, fn, ...a) => SCORE.push({ t: b * BEAT, fn, a });
 let A = null;       // the active desk while rendering
 
 function buildDesk(ctx) {
@@ -300,171 +299,156 @@ function shimmer(t, dur, v, notes) {
 }
 
 // ---------- the score
+// Sound effects are written in story beats (ev) and land wherever the picture puts that moment on
+// the 45-second clock; the music is written in output beats (evO) on 24 bars of 128 BPM.
+const evO = (ob, fn, ...a) => SCORE.push({ t: ob * BEAT, fn, a });
+const ev = (sb, fn, ...a) => evO(outBeat(sb), fn, ...a);
+const span = (sb0, sb1) => (outBeat(sb1) - outBeat(sb0)) * BEAT;     // seconds between two story beats
 const CH = {
   Am: { root: 45, pad: [57, 60, 64, 69] },
   F: { root: 41, pad: [57, 60, 65, 69] },
   C: { root: 48, pad: [55, 60, 64, 67] },
   G: { root: 43, pad: [55, 59, 62, 67] },
 };
-function chordAt(b) {
-  if (b < 8) return CH.Am;
-  if (b < 12) return CH.F;
-  if (b < 16) return CH.C;
-  if (b < 20) return CH.G;
-  if (b < 24) return CH.Am;
-  if (b < 26) return CH.F;
-  if (b < 28) return CH.G;
-  return CH.C;
+// chord and arrangement for output bar k (beats 4k..4k+4)
+function barPlan(k) {
+  if (k < 3) return { ch: CH.Am, mode: 'hook' };
+  if (k < 16) {
+    const ch = [CH.Am, CH.F, CH.C, CH.G][(k - 3) % 4];
+    if (k === 9 || k === 10) return { ch, mode: 'verse' };       // "consulte o ranking": lighter
+    if (k >= 14) return { ch, mode: 'clock' };                    // the stopwatch
+    return { ch, mode: 'full' };
+  }
+  if (k < 19) return { ch: CH.Am, mode: k === 18 ? 'build' : 'urna' };
+  if (k < 22) return { ch: k === 20 ? CH.G : CH.F, mode: 'logo', ch2: k === 21 ? CH.G : null };
+  return { ch: CH.C, mode: 'outro' };
 }
+function groove(k) {
+  const P = barPlan(k), m = P.mode;
+  if (m === 'hook' || m === 'outro') return;
+  for (let s = 0; s < 16; s++) {
+    const ob = k * 4 + s / 4;
+    const ch = P.ch2 && s >= 8 ? P.ch2 : P.ch;
+    const drums = m === 'full' || m === 'logo' || m === 'verse';
+    if (s % 4 === 0 && m !== 'urna') evO(ob, kickD, m === 'build' ? 0.6 : 0.95);
+    if (s === 4 || s === 12) evO(ob, surdo, m === 'urna' ? 0.6 : 0.85, true);
+    if (s === 0 || s === 8) evO(ob, surdo, m === 'urna' ? 0.5 : 0.4, false);
+    if (drums) evO(ob, caixa, [2, 3, 6, 10, 11, 14].includes(s) ? (m === 'verse' ? 0.2 : 0.3) : (m === 'verse' ? 0.06 : 0.1));
+    if (drums && [0, 2, 3, 5, 7, 9, 10, 12, 14].includes(s)) evO(ob, tamborim, [0, 3, 7, 10, 14].includes(s) ? 0.3 : 0.16);
+    if ((m === 'full' || m === 'logo') && k % 2 === 1) { const ag = { 0: 0, 3: 1, 6: 1, 10: 0, 12: 1 }; if (s in ag) evO(ob, agogo, 0.16, ag[s]); }
+    evO(ob, ganza, s % 2 ? 0.16 : 0.07, s % 4 < 2 ? -0.25 : 0.25);
+    if ((s === 4 || s === 12) && drums) evO(ob, clap, 0.32);
+    if (s % 4 === 2 && drums) evO(ob, hat, 0.1, true);
+    if (m !== 'urna') { const pat = { 0: 0, 3: 12, 6: 0, 8: 7, 11: 12, 14: 0 }; if (s in pat) evO(ob, bass, ch.root + pat[s], s === 14 ? 0.1 : 0.16, 0.34); }
+    if (m === 'logo' && [0, 3, 6, 10, 12].includes(s)) evO(ob, brass, ch.pad.map(n => n + 12).slice(1), 0.1, s === 0 ? 0.34 : 0.2);
+  }
+  if (m !== 'logo') evO(k * 4, pad, P.ch.pad, 4 * BEAT, m === 'urna' || m === 'build' ? 0.26 : 0.1, m === 'urna' ? 1100 : 1400);
+  else { evO(k * 4, pad, P.ch.pad, (P.ch2 ? 2 : 4) * BEAT, 0.12, 1600); if (P.ch2) evO(k * 4 + 2, pad, P.ch2.pad, 2 * BEAT, 0.12, 1600); }
+}
+
 function buildScore() {
   SCORE.length = 0;
-  const S16 = 0.25;
-  // ===== bar 1: the hook
-  ev(0, whistle, 0.42, 0.22, 26);
-  ev(0, pad, [45, 57, 60, 64], 4 * BEAT - 0.1, 0.16, 600);
-  ev(0.05, hum, 0.8 * BEAT, 0.035);
-  ev(0.1, shimmer, 0.8 * BEAT, 0.05, [88, 93]);
-  ev(1, swell, 0.45, 0.12);
+  for (let k = 0; k < OUT_BEATS / 4; k++) groove(k);
+  // ===== the hook: a drone, a heartbeat, the lamp
+  evO(0, whistle, 0.42, 0.22, 26);
+  evO(0, pad, [45, 57, 60, 64], 12 * BEAT - 0.3, 0.3, 750);
+  for (let ob = 0.5; ob < 10; ob += 2) { evO(ob, surdo, 0.5, false); evO(ob + 0.4, surdo, 0.36, false); }
+  ev(0.05, hum, span(0.05, 0.9), 0.035);
+  ev(0.1, shimmer, span(0.1, 0.9), 0.05, [88, 93]);
+  evO(outBeat(1), swell, 0.45, 0.12);
   ev(1, surdo, 1, true); ev(1, impact, 0.35); ev(1, brass, [45, 57, 64], 0.16, 0.22, 0.4);
   ev(2, surdo, 1, true); ev(2, impact, 0.55); ev(2, brass, [45, 57, 60, 64], 0.2, 0.28, 0.45);
-  ev(2.06, hum, 1.4 * BEAT, 0.05);
-  // the lamp: a zap on every stutter
+  ev(2.06, hum, span(2.06, 3.5), 0.05);
   let prev = 0;
   for (let b = 2.0; b < 3.5; b += 1 / 16) { const l = lampAt(b); if (Math.abs(l - prev) > 0.3) ev(b, zap, 0.16 + 0.06 * hash(b * 16)); prev = l; }
-  ev(2.5, surdo, 0.45, false); ev(3, surdo, 0.7, true);
-  for (let s = 0; s < 8; s++) ev(2 + s * 0.25, hat, 0.08 + s * 0.01, false);
-  ev(3.0, rollD, 0.5 * BEAT, 0.1, 0.45);
-  ev(3.0, swell, 0.5 * BEAT, 0.2);
-  // blackout, then the mestre calls the bateria in: pi... piiii!
+  for (let ob = 6; ob < 10; ob += 0.5) evO(ob, hat, 0.06 + (ob - 6) * 0.012, false);
+  evO(8, surdo, 0.5, true);
+  ev(3.0, rollD, span(3.0, 3.5), 0.1, 0.45);
+  ev(3.0, swell, span(3.0, 3.5), 0.2);
   ev(3.5, whistle, 0.09, 0.34, 30);
   ev(3.75, whistle, 0.19, 0.38, 30);
-  ev(3.6, swell, 0.4 * BEAT, 0.3);
-
-  // ===== the groove (bars 2-7), with a breakdown for the urna
-  for (let bar = 1; bar < 7; bar++) {
-    for (let s = 0; s < 16; s++) {
-      const b = bar * 4 + s * S16;
-      const clockBars = b >= 17 && b < 20, urna = b >= 20 && b < 24, full = !clockBars && !urna;
-      const ch = chordAt(b);
-      // kick: four on the floor (not under the urna)
-      if (s % 4 === 0 && !urna) ev(b, kickD, 0.95);
-      if (urna && s % 4 === 0 && b >= 23) ev(b, kickD, 0.6);
-      // surdo: marcação on 2 and 4, muted answer on 1 and 3
-      if (s === 4 || s === 12) ev(b, surdo, urna ? 0.6 : 0.85, true);
-      if ((s === 0 || s === 8) && !urna) ev(b, surdo, 0.4, false);
-      // caixa: samba sixteenths with accents
-      if (full) ev(b, caixa, [2, 3, 6, 10, 11, 14].includes(s) ? 0.3 : 0.1);
-      // tamborim: teleco-teco
-      if (full && [0, 2, 3, 5, 7, 9, 10, 12, 14].includes(s)) ev(b, tamborim, [0, 3, 7, 10, 14].includes(s) ? 0.3 : 0.16);
-      // agogô
-      if (full && bar % 2 === 1) { const ag = { 0: 0, 3: 1, 6: 1, 10: 0, 12: 1 }; if (s in ag) ev(b, agogo, 0.16, ag[s]); }
-      // ganzá everywhere
-      ev(b, ganza, s % 2 ? 0.16 : 0.07, s % 4 < 2 ? -0.25 : 0.25);
-      if ((s === 4 || s === 12) && full) ev(b, clap, 0.32);
-      if (s % 4 === 2 && full) ev(b, hat, 0.1, true);
-      // bass
-      if (!urna || b >= 23) {
-        const pat = { 0: 0, 3: 12, 6: 0, 8: 7, 11: 12, 14: 0 };
-        if (s in pat) ev(b, bass, ch.root + pat[s], s === 14 ? 0.1 : 0.16, 0.34);
-      }
-    }
-  }
-  // pads under the groove
-  ev(4, pad, CH.Am.pad, 4 * BEAT, 0.1, 1400);
-  ev(8, pad, CH.F.pad, 4 * BEAT, 0.1, 1400);
-  ev(12, pad, CH.C.pad, 4 * BEAT, 0.1, 1400);
-  ev(16, pad, CH.G.pad, 4 * BEAT, 0.1, 1400);
-  ev(20, pad, CH.Am.pad, 4 * BEAT, 0.16, 900);
-  // ===== the cuts: a brass stab + crash on every scene change (the 3-beat hemiola lands here)
+  evO(12, swell, span(3.6, 4), 0.3);
+  // ===== the cuts: brass + crash on every scene change
   ev(4, impact, 0.9); ev(4, crash, 0.34); ev(4, brass, [57, 64, 69, 72], 0.26, 0.5);
-  for (const [b, ch] of [[8, CH.F], [11, CH.F], [14, CH.C], [17, CH.G], [20, CH.Am]]) {
+  for (const [b, ch] of [[8, CH.Am], [11, CH.F], [14, CH.Am], [17, CH.Am], [20, CH.Am]]) {
     ev(b, brass, ch.pad.map(m => m + 12).slice(1), 0.18, 0.38); ev(b, crash, 0.14); ev(b, impact, 0.3);
   }
   // scene 2: flag and Congress
   for (let i = 0; i < 4; i++) ev(4.08 + i * 0.07, click, 0.1, 1800 + i * 300);
   const penta = [69, 72, 74, 76, 79, 81, 84, 86, 88];
   for (let i = 0; i < 27; i++) ev(4.6 + i * 0.028, plink, penta[i % 9] + (i > 17 ? 12 : 0) - 12, 0.05, (i % 5) / 2.5 - 0.8);
-  ev(5.5, whoosh, 0.65 * BEAT * 1.2, 0.3, true);
-  ev(6.0, whoosh, 0.7 * BEAT, 0.25, true, 0, 0);
+  ev(5.5, whoosh, span(5.5, 6.3), 0.3, true);
+  ev(6.0, whoosh, span(6.0, 6.75), 0.25, true, 0, 0);
   ev(6.75, surdo, 0.5, true);
   for (let b = 6.4; b < 7.3; b += 1 / 16) ev(b, click, 0.05, 4200);
-  ev(6.25, brass, [64, 69, 72], 0.1, 0.24);
-  ev(7.25, whoosh, 0.75 * BEAT, 0.34, true);
+  ev(6.4, brass, [64, 69, 72], 0.1, 0.24); ev(6.55, brass, [69, 72, 76], 0.1, 0.24);
+  ev(7.25, whoosh, span(7.25, 8.0), 0.34, true);
   // scene 3: the plenary pops in, then drains into the ranking
   for (let i = 0; i < 24; i++) ev(8.05 + i * 0.037, plink, penta[i % 9] - 12 + Math.floor(i / 9) * 12, 0.04, i / 12 - 1);
-  ev(9.05, whoosh, 0.9 * BEAT, 0.12, true);
+  ev(9.05, whoosh, span(9.05, 9.9), 0.12, true);
   ev(9.3, pop, 0.2, 76); ev(9.45, pop, 0.2, 72);
-  ev(10.3, slurp, 0.65 * BEAT, 0.14);
-  ev(10.4, whoosh, 0.5 * BEAT, 0.25, false);
+  ev(10.3, slurp, span(10.3, 10.95), 0.14);
+  ev(10.4, whoosh, span(10.4, 10.9), 0.25, false);
   // scene 4: the ranking card
-  ev(10.85, whoosh, 0.5 * BEAT, 0.3, true, 0.2, -0.2);
+  ev(10.85, whoosh, span(10.85, 11.4), 0.3, true, 0.2, -0.2);
   ev(11.55, click, 0.28, 2400); ev(13.35, click, 0.28, 2400); ev(16.2, click, 0.28, 2400);
   for (let i = 0; i < 18; i++) ev(11.65 + i * 0.075, click, 0.08 + 0.04 * hash(i), 3600 + 800 * hash(i * 3));
   for (let b = 12.2; b < 13.5; b += 1 / 16) ev(b, click, 0.04, 5200);
   for (let i = 0; i < 5; i++) ev(11.05 + i * 0.12, pop, 0.06, 67 + i * 2);
-  CRIT.forEach((k, i) => { ev(k.b, pop, 0.24, k.s === '+' ? 79 : 70); ev(k.b + 0.08, plink, k.s === '+' ? 84 : 67, 0.08, 0); });
+  CRIT.forEach(k => { ev(k.b, pop, 0.24, k.s === '+' ? 79 : 70); ev(k.b + 0.08, plink, k.s === '+' ? 84 : 67, 0.08, 0); });
   for (let i = 0; i < 5; i++) { const d = ROWS[i].s1 - ROWS[i].s0; ev(14.45 + i * 0.14, plink, d > 0 ? 81 + i : 64 - i, 0.05, 0.4); }
-  ev(15.2, whoosh, 0.8 * BEAT, 0.26, true, -0.4, 0.4);
+  ev(15.2, whoosh, span(15.2, 16.0), 0.26, true, -0.4, 0.4);
   ev(16.0, bell, 84, 0.12); ev(16.06, bell, 88, 0.1); ev(16.12, bell, 91, 0.08);
   // scene 5: the stopwatch
-  ev(16.7, whoosh, 0.6 * BEAT, 0.22, false);
+  ev(16.7, whoosh, span(16.7, 17.3), 0.22, false);
   ev(17.3, click, 0.3, 1500);
   for (let i = 0; i < 12; i++) ev(17.35 + i * 0.066, click, 0.07, 2600 + i * 90);
-  for (let b = 17.5; b < 19.25; b += 0.5) ev(b, click, 0.16, (b * 2) % 2 < 1 ? 5200 : 4300);
+  for (let ob = 56.5; ob < 59; ob += 0.5) evO(ob, click, 0.16, (ob * 2) % 2 < 1 ? 5200 : 4300);
   ev(19.25, bell, 88, 0.16); ev(19.25, brass, [67, 71, 74, 79], 0.14, 0.3);
   // wipe
-  ev(19.45, whoosh, 0.45 * BEAT, 0.35, true, -0.8, 0.8);
-  ev(19.98, whoosh, 0.45 * BEAT, 0.25, true, 0.8, -0.8);
+  ev(19.45, whoosh, span(19.45, 19.95), 0.35, true, -0.8, 0.8);
+  ev(19.98, whoosh, span(19.98, 20.4), 0.25, true, 0.8, -0.8);
   // scene 6: the urna (a tone on each key, as the real machine does)
   FILLS.forEach(f => { ev(f, beep, 0.07, 0.07, 1220); ev(f, click, 0.12, 1600); });
   ev(CONFIRM_B, click, 0.3, 1200);
-  // the confirmation chirp: a quick run of beeps and a held one
-  for (let i = 0; i < 5; i++) ev(CONFIRM_B + 0.06 + i * 0.11, beep, 0.05, 0.11, 1060);
-  ev(CONFIRM_B + 0.62, beep, 0.3, 0.11, 1060);
+  for (let i = 0; i < 5; i++) evO(outBeat(CONFIRM_B) + 0.12 + i * 0.23, beep, 0.05, 0.11, 1060);
+  evO(outBeat(CONFIRM_B) + 1.3, beep, 0.3, 0.11, 1060);
   ev(22.25, impact, 0.75); ev(22.25, brass, [57, 60, 64, 69], 0.2, 0.42); ev(22.25, surdo, 1, true);
   ev(22.4, impact, 0.5); ev(22.4, brass, [60, 64, 69, 72], 0.26, 0.45); ev(22.4, crash, 0.2);
-  ev(23.0, cuica, 0.3, 0.13, 420, 820);
-  ev(23.5, cuica, 0.22, 0.12, 460, 900);
-  ev(23.0, rollD, 1 * BEAT, 0.08, 0.5);
-  ev(23.3, whoosh, 0.6 * BEAT, 0.28, true, 0, 0);
-  ev(23.5, whistle, 0.09, 0.3, 30); ev(23.75, whistle, 0.2, 0.34, 30);
-  ev(23.3, swell, 0.7 * BEAT, 0.28);
-  // ===== the logo (bar 7): full band again, brass on the partido-alto accents
+  evO(73, cuica, 0.3, 0.13, 420, 820);
+  evO(74.5, cuica, 0.22, 0.12, 460, 900);
+  evO(74, rollD, 2 * BEAT, 0.08, 0.5);
+  ev(23.3, whoosh, span(23.3, 24), 0.28, true, 0, 0);
+  evO(75, whistle, 0.09, 0.3, 30); evO(75.5, whistle, 0.2, 0.34, 30);
+  evO(76, swell, span(23.3, 24), 0.28);
+  // ===== the logo
   ev(24, impact, 1); ev(24, crash, 0.34);
-  for (let s = 0; s < 16; s++) {
-    const b = 24 + s * S16, ch = chordAt(b);
-    if (s % 4 === 0) ev(b, kickD, 0.95);
-    if (s === 4 || s === 12) ev(b, surdo, 0.9, true);
-    if (s === 0 || s === 8) ev(b, surdo, 0.4, false);
-    ev(b, caixa, [2, 3, 6, 10, 11, 14].includes(s) ? 0.28 : 0.09);
-    if ([0, 2, 3, 5, 7, 9, 10, 12, 14].includes(s)) ev(b, tamborim, [0, 3, 7, 10, 14].includes(s) ? 0.28 : 0.14);
-    ev(b, ganza, s % 2 ? 0.16 : 0.07, s % 4 < 2 ? -0.25 : 0.25);
-    if (s === 4 || s === 12) ev(b, clap, 0.3);
-    const pat = { 0: 0, 3: 12, 6: 0, 8: 7, 11: 12, 14: 0 };
-    if (s in pat) ev(b, bass, ch.root + pat[s], 0.16, 0.34);
-    if ([0, 3, 6, 10, 12].includes(s)) ev(b, brass, ch.pad.map(m => m + 12).slice(1), 0.1, s === 0 ? 0.36 : 0.22);
-  }
-  ev(24, pad, CH.F.pad, 2 * BEAT, 0.12, 1600); ev(26, pad, CH.G.pad, 2 * BEAT, 0.12, 1600);
-  // the swarm is swallowed, one plink per shape (a rising run)
   for (let i = 0; i < 24; i++) ev(24.5 + (i / 24) * 0.55 + 0.3, plink, 72 + [0, 2, 4, 7, 9][i % 5] + Math.floor(i / 5) * 12 - 12, 0.05, (i % 7) / 3.5 - 1);
-  ev(24.0, whoosh, 1.1 * BEAT, 0.16, true, -0.5, 0.5);
+  ev(24.0, whoosh, span(24, 25.1), 0.16, true, -0.5, 0.5);
   ev(25.25, surdo, 0.6, false); ev(25.25, click, 0.2, 900);
   ev(25.5, surdo, 0.5, false); ev(25.5, click, 0.18, 1100);
   ev(25.75, pluck, 72, 0.3); ev(26.0, pluck, 76, 0.3); ev(26.25, pluck, 79, 0.32);
-  ev(26.25, whoosh, 0.7 * BEAT, 0.3, true, 0.4, -0.4);
+  ev(26.25, whoosh, span(26.25, 26.95), 0.3, true, 0.4, -0.4);
   for (let i = 0; i < 19; i++) ev(26.6 + (i < 7 ? i * 0.07 : 0.35 + (i - 7) * 0.045) + 0.2, plink, 84 + [0, 4, 7, 12][i % 4], 0.025, (i / 9) - 1);
   ev(27.4, pop, 0.3, 74); ev(27.55, pop, 0.12, 81);
-  ev(27.95, shimmer, 0.7 * BEAT, 0.08, [91, 96, 100]);
-  ev(27.5, swell, 0.5 * BEAT, 0.3);
-  // ===== the end card: resolve to C major and let it ring
+  ev(27.95, shimmer, span(27.95, 28.65), 0.08, [91, 96, 100]);
+  evO(88, swell, 0.6, 0.3);
+  // ===== the end card: resolve to C major; a soft bateria keeps it breathing while it is read
   ev(28, impact, 1); ev(28, crash, 0.4); ev(28, kickD, 1); ev(28, surdo, 1, true);
   ev(28, brass, [48, 60, 64, 67, 72, 76], 0.9, 0.7, 0.5);
-  ev(28, pad, [48, 55, 60, 64, 67, 72], 3.4 * BEAT, 0.2, 2200);
-  ev(28, bass, 36, 1.2, 0.35);
-  ev(28.05, shimmer, 3.2 * BEAT, 0.06, [84, 88, 91, 96]);
+  evO(88, pad, [48, 55, 60, 64, 67, 72], 7.2 * BEAT, 0.2, 2200);
+  evO(88, bass, 36, 1.2, 0.35);
+  evO(88.1, shimmer, 7 * BEAT, 0.06, [84, 88, 91, 96]);
   ev(28.25, whistle, 0.12, 0.2, 30);
   ev(29.65, click, 0.3, 2000); ev(29.7, bell, 96, 0.1);
-  ev(30, surdo, 0.35, true); ev(31, surdo, 0.25, true);
+  for (let ob = 89; ob < 95.5; ob += 0.5) {
+    const fade = 1 - (ob - 89) / 7;
+    evO(ob, ganza, 0.1 * fade, (ob * 2) % 2 < 1 ? -0.25 : 0.25);
+    if (ob % 2 === 1) evO(ob, surdo, 0.45 * fade, true);
+    if (ob % 2 === 0) evO(ob, surdo, 0.25 * fade, false);
+    if ((ob * 2) % 4 === 3) evO(ob, tamborim, 0.12 * fade);
+  }
+  evO(92, bell, 91, 0.06); evO(94, bell, 96, 0.05);
 }
 
 // Render the score offline through the desk. Returns an AudioBuffer (plus an error count).
@@ -508,7 +492,7 @@ async function audioMeasure() {
   const sr = 22050, { buf, errs } = await renderScore(sr);
   const L = buf.getChannelData(0), R = buf.getChannelData(1), spb = Math.round(BEAT * sr), skip = Math.round(sr * 0.02), out = [];
   let pk = 0;
-  for (let k = 0; k < 32; k++) {
+  for (let k = 0; k < OUT_BEATS; k++) {
     let s2 = 0, p = 0;
     for (let i = skip + k * spb; i < skip + (k + 1) * spb; i++) { s2 += L[i] * L[i] + R[i] * R[i]; p = Math.max(p, Math.abs(L[i]), Math.abs(R[i])); }
     pk = Math.max(pk, p);

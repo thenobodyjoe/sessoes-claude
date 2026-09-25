@@ -347,7 +347,7 @@ function domeFill(ctx, P, col, m) {
 }
 
 function counterLabel(ctx, b, b0, x, y, n, word) {
-  const p = seg(b, b0, b0 + 0.9);
+  const p = seg(b, b0, b0 + 0.6);
   if (p <= 0) return;
   const v = Math.round(n * E.outCubic(p));
   const a = pr(b, b0, b0 + 0.35);

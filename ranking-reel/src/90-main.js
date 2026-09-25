@@ -41,14 +41,14 @@ function renderFrame(t, samples, dt, shutter) {
   const t0 = performance.now();
   samples = Math.max(1, samples | 0);
   if (samples === 1) {
-    drawScene(sctx, t / BEAT);
+    drawScene(sctx, storyBeat(t / BEAT));
     glUpload(SCN);
     glPost(false, postAt(t));
   } else {
     const span = (shutter === undefined ? 0.5 : shutter) * (dt || 1 / 60);
     for (let i = 0; i < samples; i++) {
       const ts = clamp(t + ((i + 0.5) / samples - 0.5) * span, 0, DUR - 1e-4);
-      drawScene(sctx, ts / BEAT);
+      drawScene(sctx, storyBeat(ts / BEAT));
       glUpload(SCN);
       glAccumulate(i === 0, 1 / samples);
     }
@@ -132,7 +132,7 @@ window.__reel = {
     times.forEach((t, i) => {
       renderFrame(t, 1);
       x.drawImage(cv, (i % cols) * w, Math.floor(i / cols) * h, w, h);
-      x.fillStyle = '#ff0'; x.fillText(`t=${t.toFixed(2)} b=${(t / BEAT).toFixed(2)}`, (i % cols) * w + 6, Math.floor(i / cols) * h + w * 0.09);
+      x.fillStyle = '#ff0'; x.fillText(`t=${t.toFixed(2)} sb=${storyBeat(t / BEAT).toFixed(2)}`, (i % cols) * w + 6, Math.floor(i / cols) * h + w * 0.09);
     });
     return c.toDataURL('image/png');
   },

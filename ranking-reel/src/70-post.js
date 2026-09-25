@@ -127,7 +127,7 @@ function glPost(fromAcc, P) {
 const CA_HITS = [[1, 0.018], [2, 0.03], [4, 0.05], [6, 0.012], [8, 0.03], [11, 0.022], [14, 0.022], [17, 0.022], [19.25, 0.015],
                  [20, 0.03], [22, 0.02], [22.25, 0.04], [22.4, 0.03], [24, 0.06], [25.25, 0.012], [26.25, 0.02], [28, 0.045]];
 function postAt(t) {
-  const b = t / BEAT;
+  const b = storyBeat(t / BEAT);
   let ca = 0.0022;
   for (const [h, k] of CA_HITS) ca += k * kick(b, h, 5.5);
   let glitch = 0;

@@ -8,7 +8,53 @@ const W = 1080, H = 1920;
 const TAU = Math.PI * 2;
 const BPM = 128;
 const BEAT = 60 / BPM;
-const DUR = 32 * BEAT;
+
+// ------------------------------------------------------------
+// The edit was designed as 32 "story beats". The 45-second cut plays the same story on a slower
+// clock: every animation runs at 30-60% speed and each key moment holds (a slow crawl, so nothing
+// ever freezes dead) long enough to be read. Pairs of [output beat, story beat]; scene cuts land
+// on output bar lines (multiples of 4) so the music can follow. 96 output beats = 45.0 s.
+const REMAP = [
+  [0, 0], [3, 1.0], [5, 1.9], [6, 2.0], [10, 2.9], [12, 4],                 // hook
+  [15, 5.4], [17, 5.5], [20, 6.35], [22, 7.2], [26, 7.3], [28, 8],          // flag -> Congress (hold on 81 / 513)
+  [31, 9.9], [34, 10.3], [36, 11],                                          // plenary
+  [39, 13.3], [42, 13.65], [44, 14],                                        // consulte o ranking
+  [48, 15.2], [50, 16.4], [54, 16.5], [56, 17],                             // critério + re-sort
+  [59, 19.25], [62.5, 19.4], [64, 20],                                      // 2 minutos
+  [66, 21.4], [68, 22.0], [70, 22.9], [74, 23.25], [76, 24],                // urna
+  [80, 25.1], [84, 26.35], [88, 28], [91, 29.9], [96, 32],                  // logo, end card
+];
+const OUT_BEATS = REMAP[REMAP.length - 1][0];
+const DUR = OUT_BEATS * BEAT;
+// monotone cubic (Fritsch-Carlson) through REMAP: the speed changes smoothly, never backwards
+const _RM = (() => {
+  const n = REMAP.length, x = REMAP.map(p => p[0]), y = REMAP.map(p => p[1]);
+  const d = [], m = new Array(n);
+  for (let i = 0; i < n - 1; i++) d.push((y[i + 1] - y[i]) / (x[i + 1] - x[i]));
+  m[0] = d[0]; m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) { m[i] = m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], c = m[i + 1] / d[i], h = a * a + c * c;
+    if (h > 9) { const t = 3 / Math.sqrt(h); m[i] = t * a * d[i]; m[i + 1] = t * c * d[i]; }
+  }
+  return { x, y, m };
+})();
+function storyBeat(ob) {
+  const { x, y, m } = _RM;
+  if (ob <= x[0]) return y[0];
+  if (ob >= x[x.length - 1]) return y[y.length - 1];
+  let i = 0;
+  while (ob > x[i + 1]) i++;
+  const h = x[i + 1] - x[i], t = (ob - x[i]) / h, t2 = t * t, t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * y[i] + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * y[i + 1] + (t3 - t2) * h * m[i + 1];
+}
+// inverse (story beat -> output beat), for the sound effects that follow the picture
+function outBeat(sb) {
+  let lo = 0, hi = OUT_BEATS;
+  for (let k = 0; k < 40; k++) { const mid = (lo + hi) / 2; if (storyBeat(mid) < sb) lo = mid; else hi = mid; }
+  return (lo + hi) / 2;
+}
 const REDUCED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 // Scene cuts, in beats. The middle of the piece is phrased in groups of three beats (a hemiola against
