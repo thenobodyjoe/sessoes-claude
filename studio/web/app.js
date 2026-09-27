@@ -24,7 +24,7 @@ const STEPS = {
   render: [['spec', 'Desenhando a edição'], ['gfx', 'Animando os letreiros'], ['audio', 'Compondo o som'], ['comp', 'Compondo cada quadro'], ['deliver', 'Finalizando']],
 };
 const TITLES = { analysis: 'Preparando seu vídeo', briefing: 'Pensando na sua edição', render: 'Editando seu vídeo' };
-const SUGGEST = ['Estilo premium de masterclass', 'Letreiros em português', 'Legendas dinâmicas', 'Corta pausas e vícios de fala', 'Trilha cinematográfica de fundo', 'Mais energia, cortes rápidos', 'Minimalista e elegante'];
+const SUGGEST = ['Estilo premium de masterclass', 'Letreiros em português', 'Legendas dinâmicas', 'Corta as pausas', 'Trilha cinematográfica'];
 
 let proj = null, pollT = null;
 
@@ -105,7 +105,7 @@ function processing(job) {
 
 // ---------------- editor ----------------
 const video = $('#video');
-let pps = 60, sel = null, dragging = null, saveT = null, built = null;
+let pps = 60, zoom = 1, sel = null, dragging = null, saveT = null, built = null;
 
 function editor() {
   show('editor');
@@ -137,7 +137,7 @@ function buildTimeline() {
   const dur = proj.info.duration;
   video.src = `/files/${proj.id}/source.mp4`;
   const width = Math.max($('#timeline').clientWidth - 110, 400);
-  pps = Math.max(40, width / dur);
+  pps = Math.max(20, width / dur) * zoom;
   const W = dur * pps;
   $('#tracks').style.width = `${W}px`;
   $('#ruler').style.width = `${W}px`;
@@ -151,8 +151,9 @@ function buildTimeline() {
   $('#t-words').querySelectorAll('.word').forEach((w) => w.remove());
   (proj.words || []).forEach((w, i) => {
     const el = document.createElement('div');
-    el.className = 'word'; el.textContent = w.w; el.dataset.i = i;
-    el.style.left = `${w.s * pps}px`; el.style.width = `${Math.max(14, (w.e - w.s) * pps - 2)}px`;
+    const wpx = Math.max(6, (w.e - w.s) * pps - 2);
+    el.className = 'word' + (wpx < w.w.length * 6.6 + 10 ? ' dense' : ''); el.textContent = w.w; el.title = w.w; el.dataset.i = i;
+    el.style.left = `${w.s * pps}px`; el.style.width = `${wpx}px`;
     $('#t-words').appendChild(el);
   });
   drawWave();
@@ -312,6 +313,12 @@ const openIntent = (id, anchor) => {
 };
 $('#intent-list').onclick = (e) => { const el = e.target.closest('.intent'); if (el) openIntent(el.dataset.id, el); };
 $('#t-intents').addEventListener('click', (e) => { const el = e.target.closest('.region'); if (el) openIntent(el.dataset.id, el); });
+$('#timeline').addEventListener('wheel', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  zoom = Math.min(12, Math.max(1, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  built = null; editor(); if (sel) setSel(sel.t0, sel.t1);
+}, { passive: false });
 window.addEventListener('resize', () => { if (proj && $('#editor').classList.contains('on')) { built = null; editor(); } });
 
 // ---------------- briefing ----------------

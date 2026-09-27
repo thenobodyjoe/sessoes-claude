@@ -56,15 +56,31 @@ Fluxo de dados:
 ## Status
 
 - [x] Mapa e arquitetura (este arquivo)
-- [ ] Servidor: projetos, upload, job de análise, persistência
-- [ ] Web: boas-vindas + upload, tela de processamento animada
-- [ ] Web: editor (player, timeline com thumbnails, waveform e palavras, seleção + menu "+", lista de intenções, prompt global)
-- [ ] Cérebro: briefing (plano + checklist) e spec
-- [ ] Web: tela de briefing/checklist e tela de render/entrega
-- [ ] Motor guiado por spec (gfx.js genérico, comp.py, audio.py)
-- [ ] Preview ao vivo dos letreiros no player
+- [x] Servidor: projetos, upload, job de análise, persistência. Testado com upload real.
+- [x] Web: tela inicial + upload, tela de processamento animada (orbe, etapas e barra)
+- [x] Web: editor
+  - player, timeline com thumbnails, waveform e palavras;
+  - zoom com ⌘/Ctrl + rolagem;
+  - seleção por arraste ou por palavras (shift para estender) + menu "+" com formulários por tipo;
+  - lista de instruções, prompt global com sugestões, salvamento automático.
+- [x] Cérebro: briefing (plano + checklist) testado de verdade com `claude -p` (Opus 5.5); spec em teste
+- [x] Web: tela de briefing/checklist (opções + "Outro…") e tela de entrega
+- [x] Motor guiado por spec (gfx.js genérico, timeline, comp.py, audio.py)
+  - testado com um spec escrito à mão: reproduz a edição do Eric.
+- [ ] Render completo disparado pela UI com spec do Claude (em validação)
+- [ ] Preview ao vivo dos letreiros no player: `engine/gfx.js` já expõe `window.drawAt(ctx, t, layer)`, falta o canvas sobre o `<video>`
+- [ ] Refazer só o trecho alterado (hoje refaz o vídeo todo)
+- [ ] Formato vertical 9:16: o spec aceita `format`, mas os layouts de `gfx.js` são pensados em 16:9
 - [ ] v2: SFX, música e imagens gerados (ElevenLabs), variações por trecho, comentários no preview
 - [ ] v3: cenas animadas em código (ex.: montanha-russa com o rosto rastreado), biblioteca de cenas reutilizáveis
+
+### Notas de teste
+- O Chromium do Playwright não toca H.264, por isso o player aparece preto nos prints automáticos. No Chrome e no Safari toca normal.
+- Custo e tempo de um vídeo de 33 s:
+  - análise: cerca de 1 min;
+  - briefing: 1 chamada ao Claude;
+  - spec: 1 chamada ao Claude;
+  - render: cerca de 10 min em 4 núcleos.
 
 ## Ideias aprovadas (para as próximas versões)
 
