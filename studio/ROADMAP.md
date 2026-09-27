@@ -63,11 +63,20 @@ Fluxo de dados:
   - zoom com ⌘/Ctrl + rolagem;
   - seleção por arraste ou por palavras (shift para estender) + menu "+" com formulários por tipo;
   - lista de instruções, prompt global com sugestões, salvamento automático.
-- [x] Cérebro: briefing (plano + checklist) testado de verdade com `claude -p` (Opus 5.5); spec em teste
+- [x] Cérebro: briefing (plano + checklist) e spec testados de verdade com `claude -p` (Opus 5.5)
 - [x] Web: tela de briefing/checklist (opções + "Outro…") e tela de entrega
 - [x] Motor guiado por spec (gfx.js genérico, timeline, comp.py, audio.py)
   - testado com um spec escrito à mão: reproduz a edição do Eric.
-- [ ] Render completo disparado pela UI com spec do Claude (em validação)
+- [x] Render completo disparado pela UI com spec do Claude: funciona de ponta a ponta (1080p, −14 LUFS).
+  O teste mostrou três pontos para ajustar:
+  - **Guardrails de layout em `gfx.js`:** tamanho mínimo, `y` dentro da área segura, texto que não sai do quadro.
+    O Claude pôs um `titleStack` à direita, pequeno e cortado no topo.
+  - **Prompt do spec com exemplo completo:** o spec da edição do Eric como referência de qualidade, e `endCard` sempre no final.
+  - **Validar e normalizar o spec antes de renderizar** (`engine/validate.py`)
+- [ ] **Timeline pós-edição** (próxima grande etapa):
+  - o EditSpec aparece como clipes editáveis: cortes com alças, letreiros, legendas, câmera, efeitos, áudio;
+  - interruptor "atrás do apresentador";
+  - edição arrastando ou por prompt só no trecho, com trava das edições manuais e histórico de versões.
 - [ ] Preview ao vivo dos letreiros no player: `engine/gfx.js` já expõe `window.drawAt(ctx, t, layer)`, falta o canvas sobre o `<video>`
 - [ ] Refazer só o trecho alterado (hoje refaz o vídeo todo)
 - [ ] Formato vertical 9:16: o spec aceita `format`, mas os layouts de `gfx.js` são pensados em 16:9
