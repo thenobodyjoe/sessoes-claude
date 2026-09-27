@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Studio</title>
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- HOME -->
+  <section id="home" class="screen">
+    <div class="home-inner">
+      <div class="brand"><span class="dot"></span>Studio</div>
+      <h1>Diga como você quer.<br><em>O vídeo se edita.</em></h1>
+      <p class="lede">Solte um vídeo, escreva a direção geral ou marque trechos na timeline. O resto é com a gente.</p>
+      <label id="drop" class="drop">
+        <input id="file" type="file" accept="video/*" hidden>
+        <div class="drop-icon">
+          <svg viewBox="0 0 48 48" fill="none"><path d="M24 31V13m0 0-7 7m7-7 7 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 30v4a4 4 0 0 0 4 4h18a4 4 0 0 0 4-4v-4" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </div>
+        <div class="drop-title">Solte seu vídeo aqui</div>
+        <div class="drop-sub">ou clique para escolher · MP4, MOV, WEBM</div>
+        <div class="drop-progress"><i></i></div>
+      </label>
+      <div id="recent" class="recent"></div>
+    </div>
+  </section>
+
+  <!-- PROCESSING (analysis and render share it) -->
+  <section id="processing" class="screen">
+    <div class="proc">
+      <div class="orb"><i></i><i></i><i></i><b></b></div>
+      <h2 id="proc-title">Preparando seu vídeo</h2>
+      <p id="proc-msg" class="muted">Isso leva alguns instantes</p>
+      <ol id="proc-steps" class="steps"></ol>
+      <div class="bar"><i id="proc-bar"></i></div>
+      <p id="proc-error" class="error" hidden></p>
+    </div>
+  </section>
+
+  <!-- EDITOR -->
+  <section id="editor" class="screen">
+    <header class="topbar">
+      <button class="ghost icon" id="btn-home" title="Projetos">
+        <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+      </button>
+      <input id="proj-name" class="proj-name" spellcheck="false">
+      <div class="spacer"></div>
+      <span id="save-state" class="muted small">Salvo</span>
+      <button class="primary" id="btn-brief">Criar briefing</button>
+    </header>
+
+    <div class="workspace">
+      <div class="stage">
+        <div class="player">
+          <video id="video" playsinline preload="auto"></video>
+          <div class="player-bar">
+            <button class="ghost icon" id="btn-play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" class="fill"/></svg></button>
+            <span id="tc" class="tc">00:00.0</span>
+          </div>
+        </div>
+      </div>
+
+      <aside class="inspector">
+        <div class="card">
+          <div class="card-h">Direção geral</div>
+          <textarea id="global" rows="5" placeholder="Ex.: edita no estilo premium de masterclass, letreiros em português, cores da marca azul e branco, corta as pausas, trilha cinematográfica de fundo."></textarea>
+          <div class="chips" id="suggest"></div>
+        </div>
+        <div class="card grow">
+          <div class="card-h">Instruções na timeline <span id="intent-count" class="count"></span></div>
+          <div id="intent-list" class="intent-list"></div>
+          <p class="hint">Arraste sobre a timeline ou clique nas palavras para marcar um trecho. Solte e toque no <b>+</b>.</p>
+        </div>
+      </aside>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <div class="ruler" id="ruler"></div>
+      <div class="tracks" id="tracks">
+        <div class="track t-intents" id="t-intents"><span class="tlabel">Instruções</span></div>
+        <div class="track t-words" id="t-words"><span class="tlabel">Fala</span></div>
+        <div class="track t-video" id="t-video"><span class="tlabel">Vídeo</span></div>
+        <div class="track t-wave"><span class="tlabel">Áudio</span><canvas id="wave"></canvas></div>
+        <div class="selection" id="selection" hidden><button class="plus" id="plus">+</button></div>
+        <div class="playhead" id="playhead"><i></i></div>
+      </div>
+    </div>
+
+    <!-- "+" popover -->
+    <div class="pop" id="pop" hidden>
+      <div class="pop-menu" id="pop-menu"></div>
+      <div class="pop-form" id="pop-form" hidden></div>
+    </div>
+  </section>
+
+  <!-- BRIEFING -->
+  <section id="briefing" class="screen">
+    <div class="brief">
+      <div class="brief-head">
+        <button class="ghost icon" id="btn-brief-back"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg></button>
+        <div>
+          <div class="eyebrow">Briefing</div>
+          <h2 id="brief-title">O plano da sua edição</h2>
+        </div>
+      </div>
+      <div id="brief-plan" class="plan"></div>
+      <div class="eyebrow mt">Antes de começar, decida</div>
+      <div id="brief-checklist" class="checklist"></div>
+      <div class="brief-foot">
+        <span id="brief-left" class="muted small"></span>
+        <button class="primary big" id="btn-render" disabled>Editar meu vídeo</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- DONE -->
+  <section id="done" class="screen">
+    <div class="done">
+      <div class="eyebrow">Pronto</div>
+      <h2><em>Seu vídeo</em> está pronto.</h2>
+      <video id="final" controls playsinline></video>
+      <div class="done-actions">
+        <a class="primary" id="dl-preview" download>Baixar</a>
+        <a class="secondary" id="dl-master" download>Master em alta</a>
+        <button class="secondary" id="btn-refine">Ajustar e refazer</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>

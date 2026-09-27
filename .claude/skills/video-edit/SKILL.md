@@ -20,10 +20,10 @@ Network facts for this container: HuggingFace, openaipublic, alphacephei are **b
 
 The user decides after reading a script. **Do not start producing before the script is approved** (a previous user interrupted exactly that: "me escreva isso… se eu ver que ficou bom, você vai editar").
 
-1. **Probe** — `python3 video-editor/bin/probe.py SRC --out <proj>/work` → `info.json` (fps, cuts, silences, loudness) + `contact.jpg` / `cuts.jpg`. **Read the jpgs** to see framing, wardrobe, background, negative space.
-2. **Transcribe** — `python3 video-editor/bin/transcribe.py SRC --out <proj>/work --lang en|pt`. English gets 10 ms pocketsphinx boundaries; names missing from the dictionary need `--pron name="CMU PHONES"`. Fix mishearings by writing the corrected text to a file and re-running with `--text fixed.txt` (timings are transferred; verified to reproduce the hand-tuned edit exactly).
+1. **Probe** — `$VE_PY video-editor/bin/probe.py SRC --out <proj>/work` → `info.json` (fps, cuts, silences, loudness) + `contact.jpg` / `cuts.jpg`. **Read the jpgs** to see framing, wardrobe, background, negative space.
+2. **Transcribe** — `$VE_PY video-editor/bin/transcribe.py SRC --out <proj>/work --lang en|pt`. English gets 10 ms pocketsphinx boundaries; names missing from the dictionary need `--pron name="CMU PHONES"`. Fix mishearings by writing the corrected text to a file and re-running with `--text fixed.txt` (timings are transferred; verified to reproduce the hand-tuned edit exactly).
 3. **Write the script (roteiro)** in the user's language, in chat: material summary, art direction (type pair, palette, motion rules), a beat-by-beat timeline anchored on real word times and cuts, captions, sound design, deliverables, how you'll execute + honest limits, and a short list of **decisions to confirm** (presenter name/title, language of letterings, format 16:9 / 9:16, music: theirs or generated). Then stop and wait.
-4. After approval: **scaffold** `python3 video-editor/bin/new_project.py <proj> --src SRC`, copy `work/words.json` into `<proj>/`, then adapt:
+4. After approval: **scaffold** `$VE_PY video-editor/bin/new_project.py <proj> --src SRC`, copy `work/words.json` into `<proj>/`, then adapt:
    - `config.py`: `N_SRC`, `SHOT_STARTS` (from `info.json`), `DROP` (dead pauses to remove; hide the jump with a punch-in), `DISPLAY` (display transcript with `/` caption-group breaks — token count must equal `words.json`), `ACCENT_WORDS`, `CAMERA` segments, `SHAKES`, `END_CARD`.
    - `graphics/gfx.js`: rewrite the scene functions (keep the primitives, `renderFrame`, captions). Use `wt(key, n, edge)` — n counts occurrences of that exact word.
    - `audio.py`: chords/tempo; the grid is solved so two chosen hits land on beats.
@@ -31,7 +31,7 @@ The user decides after reading a script. **Do not start producing before the scr
 6. **Iterate on stills** — `node <proj>/render_gfx.mjs 30,120,560` then `python3 <proj>/comp.py 30,120,560` → `work/preview/*.jpg`; tile them with ffmpeg and **look**. Fix, repeat. Cheap.
 7. **Full render** — `node render_gfx.mjs` (~3 min) → `python3 audio.py` (~10 s) → `python3 comp.py` (~8 min for 1000 frames 1080p; run in background if > 10 min timeout risk).
 8. **QC** — contact sheet at 2 fps of the final, 1:1 crops of matte edges (hair) under behind-text, loudness (`ebur128`: target −14 LUFS / −1 dBTP), spectrogram of the music stem. You cannot listen: say so and verify by measurement.
-9. **Deliver** — `python3 video-editor/bin/deliver.py work/video.mp4 work/mix.wav --out <scratchpad> --name X` → `X_master.mp4` + `X_preview.mp4` (< 29 MiB; the in-chat file limit is **30 MiB**). Send the preview with SendUserFile (`display: render`). Commit code, never media (`work/` is gitignored).
+9. **Deliver** — `$VE_PY video-editor/bin/deliver.py work/video.mp4 work/mix.wav --out <scratchpad> --name X` → `X_master.mp4` + `X_preview.mp4` (< 29 MiB; the in-chat file limit is **30 MiB**). Send the preview with SendUserFile (`display: render`). Commit code, never media (`work/` is gitignored).
 
 ## 2. Pipeline architecture (`talking-head-edit/`)
 
