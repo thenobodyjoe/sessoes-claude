@@ -10,6 +10,7 @@
     "preview": "vite preview --host"
   },
   "dependencies": {
+    "@fontsource/im-fell-english": "5.3.0",
     "phaser": "4.2.1"
   },
   "devDependencies": {
